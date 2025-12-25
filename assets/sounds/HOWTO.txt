@@ -1,0 +1,52 @@
+COMMENT AJOUTER DES SONS D'EFFETS À MON MONDE MAGIQUE
+=====================================================
+
+1. TÉLÉCHARGEZ DES SONS GRATUITS
+   
+   Sites recommandés:
+   • Freesound.org (cherchez: "button click", "success", "error", "fanfare")
+   • Mixkit.co (section Game Sounds)
+   • Zapsplat.com (section UI Sounds)
+
+2. RENOMMEZ LES FICHIERS
+   
+   Vous devez avoir exactement ces noms:
+   ✓ pop.mp3
+   ✓ success.mp3
+   ✓ wrong.mp3
+   ✓ win.mp3
+
+3. PLACEZ LES FICHIERS ICI
+   
+   Copiez les 4 fichiers MP3 dans ce dossier:
+   /Users/redouane.belhamissi/src/MonMondeMagique/assets/sounds/
+
+4. REDÉMARREZ L'APP
+   
+   Arrêtez et relancez Expo:
+   npx expo start --clear
+
+5. TESTEZ LES SONS
+   
+   Ouvrez Paramètres dans l'app et activez "Sons 🔊"
+   Les sons joueront quand vous cliquez sur les boutons !
+
+CARACTÉRISTIQUES RECOMMANDÉES
+------------------------------
+• Format: MP3 (128 kbps minimum)
+• Sample rate: 44.1 kHz
+• Durée: 
+  - pop: 0.1-0.2 secondes
+  - success: 0.5-1 seconde
+  - wrong: 0.3-0.5 secondes
+  - win: 1-2 secondes
+• Volume: Normalisé, pas trop fort !
+
+ASTUCE
+------
+Utilisez Audacity (gratuit) pour éditer vos sons:
+• Couper au bon timing
+• Normaliser le volume
+• Exporter en MP3
+
+Bon amusement ! 🎵

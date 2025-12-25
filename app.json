@@ -1,0 +1,11 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "607156cd-039a-4315-bd00-b0b91f149aa1"
+      }
+    },
+    "owner": "clevercontent-llc",
+    "slug": "magic-world"
+  }
+}
