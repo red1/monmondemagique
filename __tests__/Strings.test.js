@@ -3,8 +3,8 @@ import { getStrings, Strings } from '../constants/Strings';
 describe('Localization Strings', () => {
   test('should return French strings by default', () => {
     const t = getStrings('fr');
-    expect(t.appName).toBe('Mon Monde Magique');
-    expect(t.mathGame).toBe('Mathématique');
+    expect(t.appName).toBe('Magic World');
+    expect(t.mathGame).toBe('Mathématiques');
   });
 
   test('should return Arabic strings', () => {
@@ -14,7 +14,7 @@ describe('Localization Strings', () => {
 
   test('should fallback to French if language not found', () => {
     const t = getStrings('non-existent');
-    expect(t.appName).toBe('Mon Monde Magique');
+    expect(t.appName).toBe('Magic World');
   });
 
   test('all languages should have voice property', () => {

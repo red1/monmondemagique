@@ -182,15 +182,21 @@ export default function ReadingGame() {
 
 const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: '#FFF5E1' },
-    scoreHeader: { padding: 10, alignItems: 'center' },
-    scoreText: { fontSize: 20, fontFamily: 'Fredoka-SemiBold', color: '#FFD700' },
+    scoreHeader: { padding: 5, alignItems: 'center' },
+    scoreText: { fontSize: 18, fontFamily: 'Fredoka-SemiBold', color: '#FFD700' },
     scrollContent: { flexGrow: 1 },
-    gameContent: { flex: 1, flexDirection: 'row', padding: 15, gap: 20 },
-    column: { flex: 1, justifyContent: 'center', gap: 15 },
-    card: { backgroundColor: 'white', minHeight: 60, borderRadius: 15, justifyContent: 'center', alignItems: 'center', elevation: 3, borderBottomWidth: 4, borderBottomColor: '#ddd', padding: 10 },
-    selectedCard: { backgroundColor: '#FFD700', borderBottomColor: '#DAA520', transform: [{scale: 1.05}] },
+    gameContent: { 
+        flex: 1, 
+        flexDirection: 'row', 
+        paddingHorizontal: '5%',
+        paddingVertical: '5%',
+        gap: 15 
+    },
+    column: { flex: 1, justifyContent: 'center', gap: 10 },
+    card: { backgroundColor: 'white', minHeight: 50, borderRadius: 15, justifyContent: 'center', alignItems: 'center', elevation: 3, borderBottomWidth: 4, borderBottomColor: '#ddd', padding: 8 },
+    selectedCard: { backgroundColor: '#FFD700', borderBottomColor: '#DAA520', transform: [{scale: 1.02}] },
     matchedCard: { backgroundColor: '#E8F5E9', borderBottomWidth: 0, opacity: 0.6 },
-    cardText: { fontSize: 20, fontFamily: 'Fredoka-SemiBold', color: '#333', textAlign: 'center' },
+    cardText: { fontSize: 18, fontFamily: 'Fredoka-SemiBold', color: '#333', textAlign: 'center' },
     matchedText: { color: '#4CAF50', textDecorationLine: 'line-through' },
     modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
     modalCard: { backgroundColor: 'white', width: '80%', padding: 30, borderRadius: 25, alignItems: 'center', elevation: 10 },

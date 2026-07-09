@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { View, Text, StyleSheet, PanResponder, Animated, Dimensions, SafeAreaView, TouchableOpacity, Modal, Alert } from 'react-native';
+import { View, Text, StyleSheet, PanResponder, Animated, useWindowDimensions, SafeAreaView, TouchableOpacity, Modal, Alert } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSounds } from '../contexts/SoundContext';
@@ -9,8 +9,7 @@ import Header from '../src/components/shared/Header';
 import AnimatedBackground from '../src/components/shared/AnimatedBackground';
 import { speak } from '../src/utils/speechService';
 
-const { width, height } = Dimensions.get('window');
-
+// LEVELS definition stays here...
 const LEVELS = (t) => [
     { id: 1, shapes: [ { id: 'star', color: '#FFD700', icon: 'star', type: 'MaterialCommunityIcons' }, { id: 'square', color: '#5CA8FF', icon: 'square', type: 'Ionicons' }, { id: 'triangle', color: '#FF6347', icon: 'triangle', type: 'Ionicons' } ], instruction: t.logicInstruction },
     { id: 2, shapes: [ { id: 'heart', color: '#FF69B4', icon: 'heart', type: 'Ionicons' }, { id: 'cloud', color: '#87CEEB', icon: 'cloud', type: 'Ionicons' }, { id: 'moon', color: '#9370DB', icon: 'moon', type: 'Ionicons' }, { id: 'sun', color: '#FFA500', icon: 'sunny', type: 'Ionicons' } ], instruction: t.logicInstruction },
@@ -35,7 +34,7 @@ const ShapeIcon = ({ shape, size, color }) => {
     return <Ionicons name={shape.icon} size={finalSize} color={color} />;
 };
 
-const DraggableShape = ({ shape, dropZones, onDropSuccess, onDragStart, onDragEnd }) => {
+const DraggableShape = ({ shape, dropZones, onDropSuccess, onDragStart, onDragEnd, size }) => {
   const { playSound } = useSounds();
   const [pan] = useState(new Animated.ValueXY());
   const [scale] = useState(new Animated.Value(1));
@@ -61,20 +60,23 @@ const DraggableShape = ({ shape, dropZones, onDropSuccess, onDragStart, onDragEn
     },
   }), [dropZones, shape]);
 
-  if (isDropped) return <View style={styles.slot} />;
+  if (isDropped) return <View style={[styles.slot, { width: size, height: size }]} />;
   return (
-    <Animated.View {...panResponder.panHandlers} style={[pan.getLayout(), styles.draggable, { transform: [{ scale }] }, { zIndex: 100 }]}>
-      <ShapeIcon shape={shape} size={80} color={shape.color} />
+    <Animated.View {...panResponder.panHandlers} style={[pan.getLayout(), styles.draggable, { width: size, height: size, transform: [{ scale }] }, { zIndex: 100 }]}>
+      <ShapeIcon shape={shape} size={size * 0.8} color={shape.color} />
       {shape.label && <Text style={styles.shapeLabel}>{shape.label}</Text>}
     </Animated.View>
   );
 };
 
 export default function LogicGame() {
+  const { width, height } = useWindowDimensions();
   const router = useRouter();
   const { playSound } = useSounds();
   const { language } = useLanguage();
   const t = getStrings(language);
+  const isLandscape = width > height;
+  
   const [levelIndex, setLevelIndex] = useState(0);
   const [score, setScore] = useState(0);
   const [matchedCount, setMatchedCount] = useState(0);
@@ -85,6 +87,8 @@ export default function LogicGame() {
   const levels = LEVELS(t);
   const currentLevel = levels[levelIndex] || levels[0];
   const shuffledShapes = useMemo(() => [...currentLevel.shapes].sort(() => Math.random() - 0.5), [levelIndex]);
+
+  const SLOT_SIZE = isLandscape ? Math.min(width * 0.12, height * 0.12) : Math.min(width * 0.2, height * 0.15);
 
   const handleMatch = () => {
     const newCount = matchedCount + 1;
@@ -154,17 +158,17 @@ export default function LogicGame() {
       <View style={styles.gameArea}>
           <View style={[styles.column, { zIndex: 10 }]}>
             {shuffledShapes.map((shape) => (
-                <View key={shape.id} style={[styles.slot, draggingId === shape.id && { zIndex: 9999 }]}>
-                    <DraggableShape shape={shape} dropZones={dropZones} onDropSuccess={handleMatch} onDragStart={() => setDraggingId(shape.id)} onDragEnd={() => setDraggingId(null)} />
+                <View key={shape.id} style={[styles.slot, { width: SLOT_SIZE, height: SLOT_SIZE }, draggingId === shape.id && { zIndex: 9999 }]}>
+                    <DraggableShape shape={shape} dropZones={dropZones} size={SLOT_SIZE} onDropSuccess={handleMatch} onDragStart={() => setDraggingId(shape.id)} onDragEnd={() => setDraggingId(null)} />
                 </View>
             ))}
           </View>
           <View style={[styles.column, { zIndex: 1 }]}>
             {currentLevel.shapes.map((shape) => (
-                <View key={shape.id} style={styles.slot} onLayout={(e) => onLayoutZone(shape.id, e)}>
-                    <View style={styles.dropZone}>
-                        <ShapeIcon shape={shape} size={70} color="#D2B48C" />
-                        {shape.label && <Text style={styles.dropLabel}>{shape.label}</Text>}
+                <View key={shape.id} style={[styles.slot, { width: SLOT_SIZE, height: SLOT_SIZE }]} onLayout={(e) => onLayoutZone(shape.id, e)}>
+                    <View style={[styles.dropZone, { width: SLOT_SIZE * 0.9, height: SLOT_SIZE * 0.9 }]}>
+                        <ShapeIcon shape={shape} size={SLOT_SIZE * 0.7} color="#D2B48C" />
+                        {shape.label && <Text style={[styles.dropLabel, { fontSize: SLOT_SIZE * 0.12 }]}>{shape.label}</Text>}
                     </View>
                 </View>
             ))}
@@ -176,15 +180,22 @@ export default function LogicGame() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFF5E1' },
-  scoreHeader: { padding: 10, alignItems: 'center' },
-  scoreText: { fontSize: 20, fontFamily: 'Fredoka-SemiBold', color: '#1E90FF' },
-  gameArea: { flex: 1, flexDirection: 'row', padding: 20 },
+  scoreHeader: { padding: 5, alignItems: 'center' },
+  scoreText: { fontSize: 18, fontFamily: 'Fredoka-SemiBold', color: '#1E90FF' },
+  gameArea: { 
+    flex: 1, 
+    flexDirection: 'row', 
+    paddingHorizontal: '5%',
+    paddingVertical: '5%',
+    justifyContent: 'center',
+    alignItems: 'center'
+  },
   column: { flex: 1, justifyContent: 'space-around', alignItems: 'center' },
-  slot: { width: 100, height: 100, justifyContent: 'center', alignItems: 'center', marginVertical: 10 },
-  draggable: { width: 90, height: 90, justifyContent: 'center', alignItems: 'center' },
-  shapeLabel: { fontSize: 14, fontFamily: 'Fredoka-SemiBold', color: '#555', marginTop: 5 },
-  dropZone: { width: 95, height: 95, justifyContent: 'center', alignItems: 'center', opacity: 0.8, backgroundColor: '#E0D0C0', borderRadius: 15, borderWidth: 2, borderColor: '#BCAAA4', borderStyle: 'dashed', padding: 5 },
-  dropLabel: { fontSize: 12, fontFamily: 'Fredoka-SemiBold', color: '#8B4513', marginTop: 2, textAlign: 'center' },
+  slot: { width: 80, height: 80, justifyContent: 'center', alignItems: 'center', marginVertical: 5 },
+  draggable: { width: 70, height: 70, justifyContent: 'center', alignItems: 'center' },
+  shapeLabel: { fontSize: 12, fontFamily: 'Fredoka-SemiBold', color: '#555', marginTop: 3 },
+  dropZone: { width: 75, height: 75, justifyContent: 'center', alignItems: 'center', opacity: 0.8, backgroundColor: '#E0D0C0', borderRadius: 15, borderWidth: 2, borderColor: '#BCAAA4', borderStyle: 'dashed', padding: 5 },
+  dropLabel: { fontSize: 10, fontFamily: 'Fredoka-SemiBold', color: '#8B4513', marginTop: 1, textAlign: 'center' },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
   modalCard: { backgroundColor: 'white', width: '85%', padding: 30, borderRadius: 25, alignItems: 'center', elevation: 10 },
   modalEmoji: { fontSize: 60, marginBottom: 20 },

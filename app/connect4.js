@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Dimensions, Alert } from 'react-native';
-import { Canvas, Circle, Group, Paint, Skia, LinearGradient, vec, Fill, Path, FillType } from '@shopify/react-native-skia';
+import { View, Text, StyleSheet, TouchableOpacity, useWindowDimensions } from 'react-native';
+import { Canvas, Circle, Skia, LinearGradient, vec, Path, FillType, useTouchHandler } from '@shopify/react-native-skia';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient as RNLinearGradient } from 'expo-linear-gradient';
@@ -12,19 +12,20 @@ import { useLanguage } from '../contexts/LanguageContext';
 import { getStrings } from '../constants/Strings';
 import { speak } from '../src/utils/speechService';
 
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const COLS = 7;
 const ROWS = 6;
 const BOARD_PADDING = 20;
-const BOARD_WIDTH = Math.min(SCREEN_WIDTH - BOARD_PADDING * 2, 500);
-const CELL_SIZE = BOARD_WIDTH / COLS;
-const BOARD_HEIGHT = CELL_SIZE * ROWS;
 
 export default function Connect4Game() {
   const router = useRouter();
   const { playSound } = useSounds();
   const { language } = useLanguage();
   const t = getStrings(language);
+  const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = useWindowDimensions();
+
+  const BOARD_WIDTH = Math.min(SCREEN_WIDTH - BOARD_PADDING * 2, SCREEN_HEIGHT * 0.55, 700);
+  const CELL_SIZE = BOARD_WIDTH / COLS;
+  const BOARD_HEIGHT = CELL_SIZE * ROWS;
 
   const [board, setBoard] = useState(Array(ROWS).fill(null).map(() => Array(COLS).fill(0)));
   const [currentPlayer, setCurrentPlayer] = useState(1); // 1: Red, 2: Yellow
@@ -33,7 +34,7 @@ export default function Connect4Game() {
   const [isThinking, setIsThinking] = useState(false);
 
   // --- CRITICAL LOCKS ---
-  const isProcessingRef = useRef(false); // Hardware-level lock to prevent double moves
+  const isProcessingRef = useRef(false);
   const dropY = useSharedValue(-CELL_SIZE);
   const [animatingPiece, setAnimatingPiece] = useState(null);
 
@@ -75,9 +76,9 @@ export default function Connect4Game() {
     setAnimatingPiece(null);
     dropY.value = -CELL_SIZE;
     setIsThinking(false);
-    isProcessingRef.current = false; // RELEASE LOCK
+    isProcessingRef.current = false;
     setCurrentPlayer(player === 1 ? 2 : 1);
-  }, [dropY]);
+  }, [dropY, CELL_SIZE]);
 
   const makeComputerMove = useCallback(() => {
     if (isProcessingRef.current || winner) return;
@@ -126,23 +127,41 @@ export default function Connect4Game() {
     });
   }, [board, winner, checkWinner, playSound, dropY, handleMoveComplete]);
 
-  const dropPiece = useCallback((col) => {
+  const dropPieceRef = useRef(() => {});
+  dropPieceRef.current = (col) => {
     if (winner || isThinking || animatingPiece || isProcessingRef.current || (gameMode === 'alone' && currentPlayer === 2)) return;
-    
+
     let row = -1;
     for (let r = ROWS - 1; r >= 0; r--) {
       if (board[r][col] === 0) { row = r; break; }
     }
     if (row === -1) return;
 
-    isProcessingRef.current = true; // ACQUIRE LOCK
+    isProcessingRef.current = true;
     setAnimatingPiece({ col, player: currentPlayer });
     playSound('pop');
 
     dropY.value = withTiming(row * CELL_SIZE, { duration: 500 }, () => {
       runOnJS(handleMoveComplete)(row, col, currentPlayer);
     });
-  }, [winner, isThinking, animatingPiece, gameMode, currentPlayer, board, playSound, dropY, handleMoveComplete]);
+  };
+
+  const dropPiece = useCallback((col) => {
+    dropPieceRef.current(col);
+  }, []);
+
+  const onColumnTap = useCallback((col) => {
+    dropPieceRef.current(col);
+  }, []);
+
+  const boardTouch = useTouchHandler({
+    onStart: ({ x }) => {
+      const col = Math.floor(x / CELL_SIZE);
+      if (col >= 0 && col < COLS) {
+        runOnJS(onColumnTap)(col);
+      }
+    },
+  }, [CELL_SIZE, onColumnTap]);
 
   // --- LOGIC EFFECTS ---
 
@@ -177,7 +196,7 @@ export default function Connect4Game() {
     setAnimatingPiece(null);
     isProcessingRef.current = false;
     dropY.value = -CELL_SIZE;
-    playSound('click');
+    playSound('pop');
   };
 
   const handleListen = () => {
@@ -197,15 +216,15 @@ export default function Connect4Game() {
     }
     path.setFillType(FillType.EvenOdd);
     return path;
-  }, []);
+  }, [BOARD_WIDTH, BOARD_HEIGHT, CELL_SIZE]);
 
   return (
     <View style={styles.container}>
-      <AnimatedBackground colors={['#FFF5E1', '#FFDAB9']} />
+      <AnimatedBackground />
       <Header title={`🔴 ${t.connect4Game} 🟡`} rightComponent={
         <TouchableOpacity onPress={handleListen}><Ionicons name="volume-high" size={28} color="white" /></TouchableOpacity>
       }/>
-      <View style={styles.content}>
+      <View style={[styles.content, { paddingHorizontal: SCREEN_WIDTH * 0.05, paddingVertical: SCREEN_HEIGHT * 0.05 }]}>
         <View style={styles.modeContainer}>
           <TouchableOpacity style={[styles.modeBtn, gameMode === 'alone' && styles.activeMode]} onPress={() => { setGameMode('alone'); resetGame(); }}>
             <Ionicons name="person" size={24} color={gameMode === 'alone' ? 'white' : '#666'} />
@@ -225,13 +244,8 @@ export default function Connect4Game() {
             </Text>
           )}
         </View>
-        <View style={styles.boardWrapper}>
-          <View style={styles.columnButtons}>
-            {Array(COLS).fill(0).map((_, i) => (
-              <TouchableOpacity key={i} style={styles.colBtn} onPress={() => dropPiece(i)} activeOpacity={0.6} disabled={isProcessingRef.current || !!winner} />
-            ))}
-          </View>
-          <Canvas style={styles.canvas}>
+        <View style={[styles.boardWrapper, { width: BOARD_WIDTH, height: BOARD_HEIGHT }]}>
+          <Canvas style={{ width: BOARD_WIDTH, height: BOARD_HEIGHT }} onTouch={boardTouch}>
             {board.map((row, r) => row.map((cell, c) => cell !== 0 && (
               <Circle key={`static-${r}-${c}`} cx={c * CELL_SIZE + CELL_SIZE / 2} cy={r * CELL_SIZE + CELL_SIZE / 2} r={CELL_SIZE * 0.42}>
                 <LinearGradient start={vec(c * CELL_SIZE, r * CELL_SIZE)} end={vec((c+1) * CELL_SIZE, (r+1) * CELL_SIZE)} colors={cell === 1 ? ['#FF6347', '#B22222'] : ['#FFD700', '#DAA520']} />
@@ -253,18 +267,24 @@ export default function Connect4Game() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#00CED1' },
-  content: { flex: 1, alignItems: 'center', paddingTop: 20 },
-  modeContainer: { flexDirection: 'row', gap: 10, marginBottom: 20 },
-  modeBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'white', paddingVertical: 10, paddingHorizontal: 15, borderRadius: 20, elevation: 3 },
+  content: { 
+    flex: 1, 
+    alignItems: 'center', 
+    justifyContent: 'center'
+  },
+  modeContainer: { flexDirection: 'row', gap: 10, marginBottom: 15 },
+  modeBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'white', paddingVertical: 8, paddingHorizontal: 12, borderRadius: 20, elevation: 3 },
   activeMode: { backgroundColor: '#00CED1' },
-  modeText: { marginLeft: 8, fontSize: 16, fontFamily: 'Fredoka-SemiBold', color: '#666' },
+  modeText: { marginLeft: 8, fontSize: 14, fontFamily: 'Fredoka-SemiBold', color: '#666' },
   activeModeText: { color: 'white' },
-  statusBox: { height: 60, justifyContent: 'center', marginBottom: 10 },
-  turnMsg: { fontSize: 24, fontFamily: 'Fredoka-SemiBold', textShadowColor: 'rgba(0,0,0,0.1)', textShadowOffset: { width: 1, height: 1 }, textShadowRadius: 2 },
-  winnerMsg: { fontSize: 28, fontFamily: 'Fredoka-SemiBold', color: '#32CD32' },
-  boardWrapper: { width: BOARD_WIDTH, height: BOARD_HEIGHT, borderRadius: 15, overflow: 'hidden', elevation: 10, backgroundColor: 'white' },
-  canvas: { flex: 1 },
-  columnButtons: { ...StyleSheet.absoluteFillObject, flexDirection: 'row', zIndex: 10 },
-  colBtn: { flex: 1 },
-  resetBtn: { marginTop: 30, backgroundColor: '#FF69B4', width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', elevation: 5 },
+  statusBox: { height: 50, justifyContent: 'center', marginBottom: 5 },
+  turnMsg: { fontSize: 20, fontFamily: 'Fredoka-SemiBold', textShadowColor: 'rgba(0,0,0,0.1)', textShadowOffset: { width: 1, height: 1 }, textShadowRadius: 2 },
+  winnerMsg: { fontSize: 24, fontFamily: 'Fredoka-SemiBold', color: '#32CD32' },
+  boardWrapper: { 
+    borderRadius: 15, 
+    overflow: 'hidden', 
+    elevation: 10, 
+    backgroundColor: 'white',
+  },
+  resetBtn: { marginTop: 20, backgroundColor: '#FF69B4', width: 50, height: 50, borderRadius: 25, justifyContent: 'center', alignItems: 'center', elevation: 5 },
 });

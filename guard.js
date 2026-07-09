@@ -8,7 +8,17 @@ try {
   console.log('🔍 Étape 1 : Exécution des tests unitaires...');
   execSync('npm test', { stdio: 'inherit' });
   
-  console.log('✅ Étape 2 : Vérification des fonctionnalités critiques...');
+  console.log('✅ Étape 2 : Vérification de la configuration Expo...');
+  const appJsonPath = './app.json';
+  if (!fs.existsSync(appJsonPath)) {
+    throw new Error('Fichier app.json manquant !');
+  }
+  const appJson = JSON.parse(fs.readFileSync(appJsonPath, 'utf8'));
+  if (!appJson.expo || !appJson.expo.scheme) {
+    throw new Error('Propriété "scheme" manquante dans app.json !');
+  }
+
+  console.log('✅ Étape 3 : Vérification des fonctionnalités critiques...');
   const checklistPath = './FEATURES_CHECKLIST.md';
   if (fs.existsSync(checklistPath)) {
     const content = fs.readFileSync(checklistPath, 'utf8');

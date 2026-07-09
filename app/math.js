@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, SafeAreaView, Image, Modal, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, SafeAreaView, Image, Modal, ScrollView, useWindowDimensions } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSounds } from '../contexts/SoundContext';
@@ -10,10 +10,12 @@ import AnimatedBackground from '../src/components/shared/AnimatedBackground';
 import { speak } from '../src/utils/speechService';
 
 export default function MathGame() {
+  const { width, height } = useWindowDimensions();
   const router = useRouter();
   const { playSound } = useSounds();
   const { language } = useLanguage();
   const t = getStrings(language);
+  const isLandscape = width > height;
   
   const [score, setScore] = useState(0);
   const [phase, setPhase] = useState('ADD_SIMPLE'); 
@@ -268,17 +270,24 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFF5E1' },
   scoreHeader: { padding: 10, alignItems: 'center' },
   scoreText: { fontSize: 20, fontFamily: 'Fredoka-SemiBold', color: '#76D256' },
-  content: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 50 },
-  questionCard: { backgroundColor: 'white', padding: 30, borderRadius: 20, elevation: 5, alignItems: 'center', width: '90%', position: 'relative' },
+  content: { 
+    flex: 1, 
+    justifyContent: 'center', 
+    alignItems: 'center', 
+    gap: 30,
+    marginHorizontal: '5%',
+    marginVertical: '5%'
+  },
+  questionCard: { backgroundColor: 'white', padding: 20, borderRadius: 20, elevation: 5, alignItems: 'center', width: '100%', position: 'relative' },
   row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 15 },
-  number: { fontSize: 60, fontFamily: 'Fredoka-SemiBold', color: '#333' },
-  operator: { fontSize: 50, fontFamily: 'Fredoka-SemiBold', color: '#FF6347' },
-  visualOp: { fontSize: 24, marginHorizontal: 10, fontWeight: 'bold' },
+  number: { fontSize: 50, fontFamily: 'Fredoka-SemiBold', color: '#333' },
+  operator: { fontSize: 40, fontFamily: 'Fredoka-SemiBold', color: '#FF6347' },
+  visualOp: { fontSize: 20, marginHorizontal: 10, fontWeight: 'bold' },
   questionSpeakBtn: { marginLeft: 10 },
-  optionsContainer: { flexDirection: 'row', gap: 20, justifyContent: 'center', alignItems: 'center' },
-  optionBtn: { width: 90, height: 90, borderRadius: 45, justifyContent: 'center', alignItems: 'center', borderBottomWidth: 6, elevation: 6, overflow: 'hidden' },
-  shine: { position: 'absolute', top: 0, left: 10, width: 40, height: 25, backgroundColor: 'rgba(255,255,255,0.4)', borderRadius: 20, transform: [{ rotate: '-20deg' }] },
-  optionText: { fontSize: 35, fontFamily: 'Fredoka-SemiBold', color: 'white' },
+  optionsContainer: { flexDirection: 'row', gap: 15, justifyContent: 'center', alignItems: 'center', flexWrap: 'wrap' },
+  optionBtn: { width: 80, height: 80, borderRadius: 40, justifyContent: 'center', alignItems: 'center', borderBottomWidth: 6, elevation: 6, overflow: 'hidden' },
+  shine: { position: 'absolute', top: 0, left: 10, width: 35, height: 20, backgroundColor: 'rgba(255,255,255,0.4)', borderRadius: 20, transform: [{ rotate: '-20deg' }] },
+  optionText: { fontSize: 30, fontFamily: 'Fredoka-SemiBold', color: 'white' },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
   modalCard: { backgroundColor: 'white', width: '85%', padding: 30, borderRadius: 25, alignItems: 'center', elevation: 10 },
   modalEmoji: { fontSize: 60, marginBottom: 20 },

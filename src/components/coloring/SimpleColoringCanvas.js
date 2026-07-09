@@ -1,5 +1,5 @@
 import React, { useState, useRef, forwardRef, useImperativeHandle, useEffect } from 'react';
-import { View, StyleSheet, Dimensions } from 'react-native';
+import { View, StyleSheet, useWindowDimensions } from 'react-native';
 import {
   Canvas,
   Image,
@@ -14,9 +14,6 @@ import {
   Group,
 } from '@shopify/react-native-skia';
 import { useSounds } from '../../../contexts/SoundContext';
-
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-const CANVAS_HEIGHT = SCREEN_HEIGHT * 0.65;
 
 const GLITTER_SOURCES = {
   glitter: require('../../../assets/sprites/glitter.gif'),
@@ -48,23 +45,65 @@ const SimpleColoringCanvas = forwardRef(({
   shape = 'none', 
   isMagic = false,
   glitterType = 'glitter',
-  zoomScale = 1, // Number
-  zoomOffset = { x: 0, y: 0 }, // Object with numbers
+  zoomScale = 1,
+  zoomOffset = { x: 0, y: 0 },
   onInteraction = () => {}
 }, ref) => {
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const canvasRef = useRef(null);
+  const containerRef = useRef(null);
   const image = useImage(imageUri === 'blank' ? null : imageUri);
   const { playSound } = useSounds();
   
-  // PERFORMANCE: Use a ref for settings to avoid re-creating touch handler
-  const settingsRef = useRef({ tool, currentColor, strokeWidth, shape, isMagic, glitterType, zoomScale, zoomOffset, image, onInteraction });
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+  const [imageRect, setImageRect] = useState({ x: 0, y: 0, width: 0, height: 0 });
   
   useEffect(() => {
-    settingsRef.current = { tool, currentColor, strokeWidth, shape, isMagic, glitterType, zoomScale, zoomOffset, image, onInteraction };
-  }, [tool, currentColor, strokeWidth, shape, isMagic, glitterType, zoomScale, zoomOffset, image, onInteraction]);
+    if (image && canvasSize.width > 0 && canvasSize.height > 0) {
+      const imgW = image.width();
+      const imgH = image.height();
+      const canvasW = canvasSize.width;
+      const canvasH = canvasSize.height;
+      
+      const imgRatio = imgW / imgH;
+      const canvasRatio = canvasW / canvasH;
+      
+      let displayW, displayH, displayX, displayY;
+      
+      if (imgRatio > canvasRatio) {
+        displayW = canvasW;
+        displayH = canvasW / imgRatio;
+        displayX = 0;
+        displayY = (canvasH - displayH) / 2;
+      } else {
+        displayH = canvasH;
+        displayW = canvasH * imgRatio;
+        displayX = (canvasW - displayW) / 2;
+        displayY = 0;
+      }
+      setImageRect({ x: displayX, y: displayY, width: displayW, height: displayH });
+    } else {
+      setImageRect({ x: 0, y: 0, width: canvasSize.width, height: canvasSize.height });
+    }
+  }, [image, canvasSize]);
 
-  // Transform a touch coordinate (screen) to a canvas coordinate
+  // PERFORMANCE: Use a ref for settings to avoid re-creating touch handler
+  const settingsRef = useRef({ tool, currentColor, strokeWidth, shape, isMagic, glitterType, zoomScale, zoomOffset, image, onInteraction, canvasSize, imageRect });
+  
+  useEffect(() => {
+    settingsRef.current = { tool, currentColor, strokeWidth, shape, isMagic, glitterType, zoomScale, zoomOffset, image, onInteraction, canvasSize, imageRect };
+  }, [tool, currentColor, strokeWidth, shape, isMagic, glitterType, zoomScale, zoomOffset, image, onInteraction, canvasSize, imageRect]);
+
+  const onLayout = (event) => {
+    const { width, height } = event.nativeEvent.layout;
+    setCanvasSize({ width, height });
+  };
+
+  // Transform a touch coordinate (relative to Canvas) to drawing coordinate
   const toCanvas = (x, y, scale, offset) => {
+    // If we have an image, touches should be relative to the imageRect if we want them to stay on the image
+    // However, the current setup draws on the whole canvas. 
+    // To fix the "offset", we must ensure that the drawing group's transform matches the touch mapping.
     return {
       x: (x - (offset?.x || 0)) / (scale || 1),
       y: (y - (offset?.y || 0)) / (scale || 1),
@@ -139,16 +178,19 @@ const SimpleColoringCanvas = forwardRef(({
     }
   }));
 
-  const performMagicFill = (screenX, screenY, s) => {
-    if (!canvasRef.current) return;
+  const performMagicFill = (viewX, viewY, s) => {
+    if (!canvasRef.current || s.canvasSize.width === 0) return;
 
     try {
+        const { x: canvasX, y: canvasY } = toCanvas(viewX, viewY, s.zoomScale, s.zoomOffset);
         const snapshot = canvasRef.current.makeImageSnapshot();
         const w = Math.floor(snapshot.width());
         const h = Math.floor(snapshot.height());
         
-        const x = Math.floor(screenX * (w / SCREEN_WIDTH));
-        const y = Math.floor(screenY * (h / CANVAS_HEIGHT));
+        const scaleX = w / s.canvasSize.width;
+        const scaleY = h / s.canvasSize.height;
+        const x = Math.max(0, Math.min(w - 1, Math.floor(canvasX * scaleX)));
+        const y = Math.max(0, Math.min(h - 1, Math.floor(canvasY * scaleY)));
 
         const pixels = snapshot.readPixels(0, 0, {
             width: w,
@@ -173,8 +215,8 @@ const SimpleColoringCanvas = forwardRef(({
 
         if (!isWhite(x, y)) return;
 
-        const scaleX = SCREEN_WIDTH / w;
-        const scaleY = CANVAS_HEIGHT / h;
+        const layoutScaleX = s.canvasSize.width / w;
+        const layoutScaleY = s.canvasSize.height / h;
 
         while (stack.length > 0) {
             let [cX, cY] = stack.pop();
@@ -183,18 +225,16 @@ const SimpleColoringCanvas = forwardRef(({
             let rX = cX;
             while (rX < w - 1 && isWhite(rX + 1, cY)) rX++;
             
-            const leftX = lX * scaleX;
-            const rightX = (rX + 1) * scaleX;
-            const topY = cY * scaleY;
-            
-            const startCanvas = toCanvas(leftX, topY, s.zoomScale, s.zoomOffset);
-            const endCanvas = toCanvas(rightX, topY, s.zoomScale, s.zoomOffset);
+            const leftX = lX * layoutScaleX;
+            const rightX = (rX + 1) * layoutScaleX;
+            const topY = cY * layoutScaleY;
+            const rowHeight = layoutScaleY + 0.2;
 
             fillPath.addRect({
-                x: startCanvas.x, 
-                y: startCanvas.y, 
-                width: endCanvas.x - startCanvas.x, 
-                height: (scaleY + 0.2) / s.zoomScale
+                x: leftX,
+                y: topY,
+                width: rightX - leftX,
+                height: rowHeight,
             });
 
             for (let i = lX; i <= rX; i++) {
@@ -281,16 +321,18 @@ const SimpleColoringCanvas = forwardRef(({
   }, []); // PERFORMANCE: Empty dependency array means this handler is never re-created!
 
   return (
-    <View style={styles.container}>
-      <Canvas style={styles.canvas} onTouch={onTouch} ref={canvasRef}>
-        {/* White Background Layer (Always full screen) */}
-        <Path path={Skia.Path.Make().addRect({x:0,y:0,width:SCREEN_WIDTH,height:CANVAS_HEIGHT})} color="white" />
-
+    <View style={styles.container} onLayout={onLayout} ref={containerRef}>
+      <Canvas 
+        style={styles.canvas} 
+        onTouch={onTouch} 
+        ref={canvasRef}
+      >
         <Group transform={[
           { translateX: zoomOffset.x },
           { translateY: zoomOffset.y },
           { scale: zoomScale },
         ]}>
+          <Path path={Skia.Path.Make().addRect({x:0,y:0,width:canvasSize.width,height:canvasSize.height})} color="white" />
           {/* Layer 2: Committed Drawings and Magic Fills */}
           {paths.map((p, index) => (
             <Path 
@@ -338,7 +380,14 @@ const SimpleColoringCanvas = forwardRef(({
 
           {/* Layer 3: Line Art (Multiply) */}
           {image && imageUri !== 'blank' && (
-            <Image image={image} x={0} y={0} width={SCREEN_WIDTH} height={CANVAS_HEIGHT} fit="contain" blendMode="multiply" />
+            <Image 
+              image={image} 
+              x={imageRect.x} 
+              y={imageRect.y} 
+              width={imageRect.width} 
+              height={imageRect.height} 
+              blendMode="multiply" 
+            />
           )}
         </Group>
       </Canvas>
@@ -347,7 +396,7 @@ const SimpleColoringCanvas = forwardRef(({
 });
 
 const styles = StyleSheet.create({
-  container: { width: '100%', height: CANVAS_HEIGHT, backgroundColor: '#fff' },
+  container: { flex: 1, backgroundColor: '#fff' },
   canvas: { flex: 1 },
 });
 

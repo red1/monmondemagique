@@ -1,5 +1,5 @@
 import React, { useState, useRef, useMemo, useCallback, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView, Dimensions, Modal, PanResponder, Image as RNImage } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView, useWindowDimensions, Modal, PanResponder, Image as RNImage } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { GestureDetector, Gesture, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { useSharedValue, useAnimatedStyle, runOnJS } from 'react-native-reanimated';
@@ -18,9 +18,8 @@ import { getStrings } from '../../constants/Strings';
 import { convertToSketch } from '../utils/imageFilters';
 import { speak } from '../utils/speechService';
 
-const { width } = Dimensions.get('window');
-
 const SpectrumPicker = ({ onColorSelect, label }) => {
+  const { width } = useWindowDimensions();
   const [hue, setHue] = useState(0);
   const spectrumWidth = width * 0.8;
 
@@ -78,6 +77,7 @@ const SpectrumPicker = ({ onColorSelect, label }) => {
 };
 
 const ColoringScreen = () => {
+  const { width, height } = useWindowDimensions();
   const router = useRouter();
   const params = useLocalSearchParams();
   const { playSound } = useSounds();
@@ -111,7 +111,7 @@ const ColoringScreen = () => {
 
   const [zoomScale, setZoomScale] = useState(1);
   const [zoomOffset, setZoomOffset] = useState({ x: 0, y: 0 });
-  const [lastInteraction, setLastInteraction] = useState({ x: width / 2, y: Dimensions.get('window').height * 0.3 });
+  const [lastInteraction, setLastInteraction] = useState({ x: width / 2, y: height * 0.3 });
 
   const updateZoomProps = useCallback(() => {
     // Only update state if values are valid numbers to prevent crashes
@@ -369,7 +369,7 @@ const ColoringScreen = () => {
         }/>
 
         <GestureDetector gesture={composedGesture}>
-          <View style={{ flex: 1 }}>
+          <View style={styles.canvasWrapper}>
                         <SimpleColoringCanvas
                           ref={canvasRef}
                           imageUri={imageUri}
@@ -643,6 +643,15 @@ const ColoringScreen = () => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: 'white' },
+  canvasWrapper: { 
+    flex: 1,
+    marginHorizontal: '5%',
+    marginVertical: '2%', // Less margin here because footer/header already take space
+    backgroundColor: 'white',
+    borderRadius: 15,
+    overflow: 'hidden',
+    elevation: 3
+  },
   pickerContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
   pickerTitle: { fontSize: 24, fontFamily: 'Fredoka-SemiBold', color: '#333', marginBottom: 30, textAlign: 'center' },
   pickerButtons: { width: '100%', gap: 15 },

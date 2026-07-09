@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Modal } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useLanguage } from '../../../contexts/LanguageContext';
+import { safeGoBack } from '../../utils/safeNavigation';
 
 const LANGUAGES = [
   { code: 'fr', name: 'Français', flag: '🇫🇷' },
@@ -15,21 +17,22 @@ const LANGUAGES = [
 /**
  * Header - En-tête réutilisable avec titre, bouton retour et sélecteur de langue
  */
-const Header = ({ title, showBack = true, leftComponent = null, rightComponent = null }) => {
+const Header = ({ title, showBack = true, leftComponent = null, rightComponent = null, backFallback = '/' }) => {
   const router = useRouter();
   const { language, changeLanguage } = useLanguage();
   const [showLangPicker, setShowLangPicker] = useState(false);
+  const insets = useSafeAreaInsets();
 
   const currentLang = LANGUAGES.find(l => l.code === language) || LANGUAGES[0];
 
   return (
-    <View style={styles.header}>
+    <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
       <View style={styles.leftContainer}>
         {leftComponent ? leftComponent : (
           showBack ? (
             <TouchableOpacity 
               style={styles.backButton} 
-              onPress={() => router.back()}
+              onPress={() => safeGoBack(router, backFallback)}
             >
               <Ionicons name="arrow-back" size={28} color="white" />
             </TouchableOpacity>
@@ -87,7 +90,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#00CED1',
     paddingHorizontal: 16,
     paddingVertical: 12,
-    paddingTop: 50,
     elevation: 4,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },

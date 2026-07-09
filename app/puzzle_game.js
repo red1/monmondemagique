@@ -391,7 +391,11 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFF5E1' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   loadingText: { fontSize: 20, fontFamily: 'Fredoka-SemiBold', color: '#666' },
-  fullCanvas: { flex: 1 },
+  fullCanvas: { 
+    flex: 1,
+    marginHorizontal: '5%',
+    marginVertical: '5%'
+  },
   winOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', zIndex: 100 },
   winCard: { padding: 40, borderRadius: 30, alignItems: 'center', elevation: 10 },
   winText: { fontSize: 40, fontFamily: 'Fredoka-SemiBold', color: 'white', marginBottom: 20 },

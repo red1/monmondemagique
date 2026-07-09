@@ -1,11 +1,46 @@
 {
   "expo": {
+    "name": "Magic World",
+    "slug": "magic-world",
+    "owner": "clevercontent-llc",
+    "version": "1.0.0",
+    "orientation": "default",
+    "userInterfaceStyle": "light",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.monmondemagique.app"
+    },
+    "android": {
+      "package": "com.monmondemagique.app"
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-image-picker",
+      "expo-media-library",
+      "expo-updates",
+      [
+        "expo-font",
+        {
+          "fonts": [
+            "./assets/fonts/Fredoka-SemiBold.ttf"
+          ]
+        }
+      ]
+    ],
+    "scheme": "mon-monde-magique",
     "extra": {
+      "router": {
+        "origin": false
+      },
       "eas": {
         "projectId": "607156cd-039a-4315-bd00-b0b91f149aa1"
       }
-    },
-    "owner": "clevercontent-llc",
-    "slug": "magic-world"
+    }
   }
 }

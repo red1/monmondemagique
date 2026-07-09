@@ -13,7 +13,9 @@ const GlossyButton = ({
   color, 
   darkColor, 
   onPress, 
-  fullWidth = false 
+  fullWidth = false,
+  compact = false,
+  titleSize = 24,
 }) => {
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
@@ -59,6 +61,7 @@ const GlossyButton = ({
       <TouchableOpacity
         style={[
           fullWidth ? styles.buttonFull : styles.button,
+          compact && styles.buttonCompact,
           { backgroundColor: color, borderBottomColor: darkColor }
         ]}
         onPress={onPress}
@@ -80,7 +83,7 @@ const GlossyButton = ({
           
           <View style={styles.textContainer}>
             {subtitle && <Text style={styles.subtitle}>{subtitle}</Text>}
-            <Text style={styles.title}>{title}</Text>
+            <Text style={[styles.title, { fontSize: titleSize }]}>{title}</Text>
           </View>
         </View>
       </TouchableOpacity>
@@ -92,6 +95,7 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     margin: 8,
+    alignSelf: 'stretch',
   },
   containerFull: {
     width: '100%',
@@ -99,6 +103,8 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
   },
   button: {
+    flex: 1,
+    alignSelf: 'stretch',
     borderRadius: 40,
     padding: 20,
     borderBottomWidth: 6,
@@ -110,6 +116,12 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     minHeight: 140,
     justifyContent: 'center',
+  },
+  buttonCompact: {
+    padding: 12,
+    minHeight: 0,
+    borderRadius: 28,
+    borderBottomWidth: 4,
   },
   buttonFull: {
     borderRadius: 40,

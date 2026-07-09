@@ -31,6 +31,7 @@ jest.mock('@shopify/react-native-skia', () => {
     Fill: () => null,
     Path: () => null,
     FillType: { EvenOdd: 0 },
+    useTouchHandler: () => ({}),
   };
 });
 
@@ -109,6 +110,14 @@ jest.mock('../contexts/LanguageContext', () => ({
     language: 'fr',
     changeLanguage: jest.fn(),
   }),
+}));
+
+// Mock useWindowDimensions
+jest.spyOn(require('react-native'), 'useWindowDimensions').mockReturnValue({ width: 400, height: 800 });
+
+jest.mock('react-native-safe-area-context', () => ({
+  useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
+  SafeAreaProvider: ({ children }) => children,
 }));
 
 describe('Connect4Game', () => {

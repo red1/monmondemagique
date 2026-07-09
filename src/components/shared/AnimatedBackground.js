@@ -103,7 +103,7 @@ const AnimatedBubble = ({ delay = 0 }) => {
 
 const AnimatedBackground = ({ colors = ['#FFDAB9', '#FFE4E1', '#FFB6C1'] }) => {
   return (
-    <LinearGradient colors={colors} style={styles.background}>
+    <LinearGradient colors={colors} style={styles.background} pointerEvents="none">
       {[...Array(15)].map((_, i) => (
         <AnimatedBubble key={i} delay={i * 800} />
       ))}
