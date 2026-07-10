@@ -13,7 +13,7 @@ import { getStrings } from '../constants/Strings';
 const { width } = Dimensions.get('window');
 
 // Dynamically load all local drawings from assets/coloriages
-const localColoriages = require.context('../assets/coloriages', false, /\.(png|jpg|jpeg)$/);
+const localColoriages = require.context('../assets/coloriages', false, /\.(png|jpe?g|webp)$/);
 
 export default function PuzzleLibrary() {
   const router = useRouter();

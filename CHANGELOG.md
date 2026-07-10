@@ -4,6 +4,34 @@ Historique des modifications et améliorations de l'application.
 
 ---
 
+## [3.0.0] - 10 Juillet 2026
+
+### Histoires & musiques (module complet)
+
+- Catalogue ~200 packs Lunii (`assets/stories/catalog.json`)
+- Téléchargement MEGA + HTTP avec reprise (`pack.enc` / `pack.zip`)
+- Extraction streaming (décryptage + unzip par blocs 8 Mo)
+- Bibliothèque locale : filtres (nom, type, artiste, pack, durée…)
+- File d'attente, playlists nommées, reprise par histoire
+- Lecteur : timeline, seek, pochette, playlist latérale
+- Contrôle parental intégré (limite histoires, minuterie, PIN)
+- Vignettes locales + réparation automatique
+
+### Performances majeures
+
+- Extraction parallèle (8 écritures) sans bloquer l'UI
+- Cache bibliothèque en mémoire + maps catalogue O(1)
+- `StoryGridCard` memo, filtres debouncés, lecteur throttlé
+- Contextes optimisés (download split, SoundContext stable)
+- Voir [PERFORMANCE.md](./PERFORMANCE.md)
+
+### Documentation
+
+- README.md entièrement réécrit
+- PERFORMANCE.md ajouté
+
+---
+
 ## [2.0.0] - 24 Décembre 2024 🎄
 
 ### 🎉 Refonte Majeure Complete

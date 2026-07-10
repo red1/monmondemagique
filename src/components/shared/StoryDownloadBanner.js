@@ -5,7 +5,7 @@ import {
 import { useRouter, usePathname } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useStoryDownload } from '../../../contexts/StoryDownloadContext';
+import { useStoryDownloadProgress } from '../../../contexts/StoryDownloadContext';
 import { useLanguage } from '../../../contexts/LanguageContext';
 import { getStrings } from '../../../constants/Strings';
 import { getAllPackages } from '../../services/storyService';
@@ -14,7 +14,7 @@ export default function StoryDownloadBanner() {
   const router = useRouter();
   const pathname = usePathname();
   const insets = useSafeAreaInsets();
-  const { downloadProgress, activeCount } = useStoryDownload();
+  const { downloadProgress, activeCount } = useStoryDownloadProgress();
   const { language } = useLanguage();
   const t = getStrings(language);
 

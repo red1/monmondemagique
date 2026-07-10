@@ -1,18 +1,12 @@
 import { Buffer } from 'buffer';
 import * as FileSystem from 'expo-file-system';
-import { Unzip, UnzipInflate } from 'fflate';
 import { File, decrypt } from 'megajs/dist/main.browser-es.mjs';
 import {
-  createWriteQueue,
-  ensureZipDirectory,
-  isZipDirectoryEntry,
-  isZipFileEntry,
-  normalizeZipEntryName,
-  writeZipEntry,
+  createStreamingUnzipSession,
+  getSharedWriteQueue,
+  READ_CHUNK_SIZE,
+  yieldToEventLoop,
 } from './zipExtract';
-
-/** 4 MB — aligned to AES block size; ~15 reads for a 60 MB pack, peak ~5 MB in JS */
-const READ_CHUNK_SIZE = 4 * 1024 * 1024;
 
 function packLog(step, detail) {
   if (!__DEV__) return;
@@ -29,17 +23,6 @@ function formatBytes(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function mergeParts(parts) {
-  const totalLen = parts.reduce((sum, part) => sum + part.length, 0);
-  const combined = new Uint8Array(totalLen);
-  let offset = 0;
-  for (const part of parts) {
-    combined.set(part, offset);
-    offset += part.length;
-  }
-  return combined;
 }
 
 export function megaFileFromURL(url) {
@@ -108,66 +91,18 @@ async function decryptEncryptedFileAndUnzip({
 
   phaseReport(0.58, 'decrypting');
 
-  const unzip = new Unzip();
-  unzip.register(UnzipInflate);
-  const enqueueWrite = createWriteQueue();
+  const session = createStreamingUnzipSession(destDir, {
+    enqueueWrite: getSharedWriteQueue(),
+    control,
+    onFileExtracted,
+    formatBytes,
+    log: packLog,
+    onProgress: (status) => phaseReport(phase.progress, status),
+  });
 
-  let fileCount = 0;
+  const { unzip } = session;
   let lastLoggedPct = -1;
-  let unzipStarted = false;
-  const pendingWrites = [];
-
-  unzip.onfile = (entry) => {
-    control?.checkAborted?.();
-    const name = normalizeZipEntryName(entry.name);
-    fileCount += 1;
-
-    if (!unzipStarted) {
-      unzipStarted = true;
-      phaseReport(0.62, 'unzipping');
-    }
-
-    if (name.endsWith('/')) {
-      packLog('Zip directory', { name });
-      pendingWrites.push(enqueueWrite(() => ensureZipDirectory(destDir, name)));
-      return;
-    }
-
-    packLog('Zip entry found', { index: fileCount, name, compressed: formatBytes(entry.size), original: formatBytes(entry.originalSize) });
-    const parts = [];
-    entry.ondata = (err, data, final) => {
-      if (err) throw err;
-      if (data?.length) parts.push(data);
-      if (final) {
-        pendingWrites.push(enqueueWrite(async () => {
-          control?.checkAborted?.();
-          const bytes = parts.length === 1 ? parts[0] : mergeParts(parts);
-          if (bytes.length === 0 && !isZipFileEntry(name)) {
-            await ensureZipDirectory(destDir, name);
-            packLog('Skip empty directory entry', { name });
-            return;
-          }
-          if (bytes.length === 0) {
-            packLog('Skip empty file entry', { name });
-            return;
-          }
-          phaseReport(phase.progress, 'extracting');
-          const result = await writeZipEntry(destDir, name, bytes, {
-            formatBytes,
-            originalSize: entry.originalSize,
-            skipIfValid: true,
-            onWrite: ({ name: entryName, size, skipped }) => {
-              if (skipped) packLog('Skip existing file', { name: entryName, size: formatBytes(size) });
-              else packLog('Extract file', { name: entryName, size: formatBytes(size) });
-            },
-          });
-          if (result.skipped) packLog('Skip empty entry', { name });
-          else if (onFileExtracted) await onFileExtracted(name);
-        }));
-      }
-    };
-    entry.start();
-  };
+  let lastYieldAt = 0;
 
   if (key) {
     const decryptStream = decrypt(key);
@@ -188,15 +123,20 @@ async function decryptEncryptedFileAndUnzip({
       position += length;
 
       const pct = Math.floor((position / totalSize) * 100);
-      if (pct >= lastLoggedPct + 10 || position >= totalSize) {
+      if (pct >= lastLoggedPct + 15 || position >= totalSize) {
         lastLoggedPct = pct;
-        packLog('Decrypt progress', { pct: `${pct}%`, position: formatBytes(position), total: formatBytes(totalSize) });
+        packLog('Decrypt progress', { pct: `${pct}%`, position: formatBytes(position) });
       }
       phaseReport(
         0.58 + (position / totalSize) * 0.38,
         position < totalSize * 0.12 ? 'decrypting' : 'unzipping',
         { bytesWritten: position },
       );
+
+      if (position - lastYieldAt >= READ_CHUNK_SIZE) {
+        lastYieldAt = position;
+        await yieldToEventLoop();
+      }
     }
 
     await endStream(decryptStream);
@@ -212,23 +152,24 @@ async function decryptEncryptedFileAndUnzip({
         length,
       });
       const isLast = position + length >= totalSize;
-      if (!unzipStarted) {
-        unzipStarted = true;
-        phaseReport(0.62, 'unzipping');
-      }
-      unzip.push(new Uint8Array(Buffer.from(b64, 'base64')), isLast);
+      session.pushChunk(new Uint8Array(Buffer.from(b64, 'base64')), isLast);
       position += length;
       phaseReport(0.58 + (position / totalSize) * 0.38, 'unzipping', { bytesWritten: position });
+
+      if (position - lastYieldAt >= READ_CHUNK_SIZE) {
+        lastYieldAt = position;
+        await yieldToEventLoop();
+      }
     }
   }
 
-  await Promise.all(pendingWrites);
-  packLog('Decrypt + unzip done', { files: fileCount, writes: pendingWrites.length });
+  const result = await session.finish();
+  packLog('Decrypt + unzip done', result);
 }
 
 /**
  * Download a MEGA pack without loading the full file into JS memory.
- * Encrypted bytes are saved natively, then decrypted/unzipped in 4 MB chunks.
+ * Encrypted bytes are saved natively, then decrypted/unzipped in large chunks.
  */
 export async function megaDownloadAndExtract(url, destDir, { report, packId, control, onFileExtracted } = {}) {
   const startedAt = Date.now();
@@ -290,12 +231,11 @@ export async function megaDownloadAndExtract(url, destDir, { report, packId, con
         if (control?.aborted) return;
         if (progress.totalBytesExpectedToWrite > 0) {
           const pct = Math.floor((progress.totalBytesWritten / progress.totalBytesExpectedToWrite) * 100);
-          if (pct >= lastLoggedPct + 10 || pct === 100) {
+          if (pct >= lastLoggedPct + 15 || pct === 100) {
             lastLoggedPct = pct;
             packLog('MEGA native download', {
               pct: `${pct}%`,
               written: formatBytes(progress.totalBytesWritten),
-              total: formatBytes(progress.totalBytesExpectedToWrite),
             });
           }
           report?.(

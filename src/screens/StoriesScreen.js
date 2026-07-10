@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
   TextInput, useWindowDimensions, Alert, ActivityIndicator, ScrollView, Modal, Pressable,
@@ -8,7 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Header from '../components/shared/Header';
 import AnimatedBackground from '../components/shared/AnimatedBackground';
-import StoryCoverImage from '../components/shared/StoryCoverImage';
+import StoryGridCard from '../components/stories/StoryGridCard';
 import PlaylistQueueBar from '../components/stories/PlaylistQueueBar';
 import ResumePlaylistModal from '../components/stories/ResumePlaylistModal';
 import SavePlaylistModal from '../components/stories/SavePlaylistModal';
@@ -24,9 +24,10 @@ import {
   subscribeStoriesLibrary, rebuildLibraryFromDisk, debugLogLibraryFileSizes, getStoryFilterOptions,
   formatStoryDurationLabel,
   getSavedPlaylists, saveNamedPlaylist, deleteSavedPlaylist, clearSavedPlaylistProgress,
-  getPackUsageCounts, playlistsMatch, getStoryDisplayThumbnail, getAllPackages,
+  getPackUsageCounts, playlistsMatch, getStoryDisplayThumbnail, getPackById,
   repairStoryThumbnailsForLibrary,
 } from '../services/storyService';
+import { useDebouncedValue } from '../utils/useDebouncedValue';
 
 const DURATION_MAX_CHIPS = [5, 10, 20];
 const STORIES_PAGE_ROWS = 8;
@@ -46,9 +47,11 @@ const StoriesScreen = () => {
   const numColumns = isTablet ? 3 : 2;
 
   const [nameFilter, setNameFilter] = useState('');
+  const debouncedNameFilter = useDebouncedValue(nameFilter);
   const [sourceFilter, setSourceFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [artistFilter, setArtistFilter] = useState('');
+  const debouncedArtistFilter = useDebouncedValue(artistFilter);
   const [genreFilter, setGenreFilter] = useState('');
   const [albumFilter, setAlbumFilter] = useState('');
   const [packFilter, setPackFilter] = useState('');
@@ -71,7 +74,23 @@ const StoriesScreen = () => {
 
   const pageSize = STORIES_PAGE_ROWS * numColumns;
 
+  const thumbnailRepairDoneRef = useRef(false);
+
   const sources = getSources();
+
+  const sourceNameById = useMemo(
+    () => new Map(sources.map((s) => [s.id, s.name])),
+    [sources],
+  );
+
+  const packThumbnailById = useMemo(() => {
+    const map = new Map();
+    playableStories.forEach((story) => {
+      if (!story.packId || map.has(story.packId)) return;
+      map.set(story.packId, getStoryDisplayThumbnail(story) || getPackById(story.packId)?.thumbnail || null);
+    });
+    return map;
+  }, [playableStories]);
 
   const applyLibraryMeta = useCallback((meta) => {
     setPlayableStories(sortStoriesByTitle(Object.values(meta)));
@@ -114,19 +133,18 @@ const StoriesScreen = () => {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      await refreshStoriesLight();
+      const [meta, progress] = await Promise.all([
+        getDownloadedStories(),
+        getValidPlaybackProgress(),
+      ]);
       if (cancelled) return;
-      getValidPlaybackProgress().then((progress) => {
-        if (!cancelled) setSavedProgress(progress);
-      });
-      getPlayableStories({ syncOnLoad: false }).then(async (stories) => {
-        if (cancelled) return;
-        setPlayableStories(stories);
-        setDownloadedMeta(await getDownloadedStories());
-      });
+      applyLibraryMeta(meta);
+      setSavedProgress(progress);
+      setLoading(false);
+      getPlayableStories({ syncOnLoad: false });
     })();
     return () => { cancelled = true; };
-  }, [refreshStoriesLight]);
+  }, [applyLibraryMeta]);
 
   useEffect(() => subscribeStoriesLibrary(refreshStoriesLight), [refreshStoriesLight]);
 
@@ -134,9 +152,12 @@ const StoriesScreen = () => {
     getValidPlaybackProgress().then(setSavedProgress);
     getSavedPlaylists().then(setSavedPlaylists);
     getPackUsageCounts().then(setPackUsageCounts);
-    repairStoryThumbnailsForLibrary({ limit: 40 }).then(({ changed }) => {
-      if (changed) refreshStoriesLight();
-    });
+    if (!thumbnailRepairDoneRef.current) {
+      thumbnailRepairDoneRef.current = true;
+      repairStoryThumbnailsForLibrary({ limit: 40 }).then(({ changed }) => {
+        if (changed) refreshStoriesLight();
+      });
+    }
   }, [refreshStoriesLight]));
 
   const refreshSavedPlaylists = useCallback(async () => {
@@ -192,10 +213,10 @@ const StoriesScreen = () => {
 
   const filteredStories = useMemo(() => {
     const opts = {
-      name: nameFilter,
+      name: debouncedNameFilter,
       source: sourceFilter,
       contentType: typeFilter,
-      artist: artistFilter,
+      artist: debouncedArtistFilter,
       album: albumFilter,
       genre: genreFilter,
       packId: packFilter,
@@ -212,7 +233,7 @@ const StoriesScreen = () => {
       opts.maxDurationMinutes = parseInt(durationFilter.replace('under', ''), 10);
     }
     return filterPlayableStories(opts);
-  }, [nameFilter, sourceFilter, typeFilter, artistFilter, albumFilter, genreFilter, packFilter, durationFilter, playableStories]);
+  }, [debouncedNameFilter, sourceFilter, typeFilter, debouncedArtistFilter, albumFilter, genreFilter, packFilter, durationFilter, playableStories]);
 
   useEffect(() => {
     setVisibleCount(pageSize);
@@ -247,14 +268,14 @@ const StoriesScreen = () => {
     return queue.slice(0, parentalStoryLimit);
   }, [queue, parentalStoryLimit]);
 
-  const toggleSelect = (id) => {
+  const toggleSelect = useCallback((id) => {
     playSound('pop');
     setQueue((prev) => {
       const idx = prev.indexOf(id);
       if (idx >= 0) return prev.filter((item) => item !== id);
       return [...prev, id];
     });
-  };
+  }, [playSound]);
 
   const moveQueueItem = (index, direction) => {
     setQueue((prev) => {
@@ -408,58 +429,35 @@ const StoriesScreen = () => {
     </View>
   );
 
-  const renderStory = ({ item }) => {
+  const cardWidth = (width - 48) / numColumns - 8;
+
+  const renderStory = useCallback(({ item }) => {
     const storyId = item.storyId;
     const queueIdx = queueIndexMap.get(storyId);
     const isQueued = queueIdx != null;
     const willPlay = isQueued && queueIdx < (parentalStoryLimit ?? queue.length);
-    const sourceName = sources.find((s) => s.id === item.source)?.name || item.source;
-    const durationLabel = formatStoryDurationLabel(item);
+    const sourceName = sourceNameById.get(item.source) || item.source;
     const displayThumbnail = getStoryDisplayThumbnail(item);
-    const packThumbnail = item.packId
-      ? getAllPackages().find((pack) => pack.id === item.packId)?.thumbnail || null
-      : null;
+    const packThumbnail = packThumbnailById.get(item.packId) || null;
 
     return (
-      <TouchableOpacity
-        style={[
-          styles.storyCard,
-          isQueued && styles.storyCardQueued,
-          willPlay && styles.storyCardWillPlay,
-          { width: (width - 48) / numColumns - 8 },
-        ]}
+      <StoryGridCard
+        item={item}
+        width={cardWidth}
+        queueIdx={queueIdx ?? 0}
+        isQueued={isQueued}
+        willPlay={willPlay}
+        sourceName={sourceName}
+        displayThumbnail={displayThumbnail}
+        fallbackThumbnail={packThumbnail !== displayThumbnail ? packThumbnail : null}
         onPress={() => toggleSelect(storyId)}
-        activeOpacity={0.85}
-      >
-        <StoryCoverImage
-          thumbnail={displayThumbnail}
-          fallbackThumbnail={packThumbnail !== displayThumbnail ? packThumbnail : null}
-          contentType={item.contentType}
-          style={styles.thumbnail}
-        />
-        {isQueued && (
-          <View style={[styles.queueBadge, willPlay && styles.queueBadgeActive]}>
-            <Text style={styles.queueBadgeText}>{queueIdx + 1}</Text>
-          </View>
-        )}
-        <Text style={styles.storyTitle} numberOfLines={2}>{item.title}</Text>
-        <Text style={styles.storyMeta} numberOfLines={1}>
-          {sourceName}
-          {item.contentType === 'song' ? ` · ${t.storiesTypeSong}` : item.contentType === 'story' ? ` · ${t.storiesTypeStory}` : ''}
-          {durationLabel ? ` · ${durationLabel}` : ''}
-        </Text>
-        {item.artist ? (
-          <Text style={styles.artistText} numberOfLines={1}>{item.artist}</Text>
-        ) : null}
-        {item.genre ? (
-          <Text style={styles.metaTag} numberOfLines={1}>{item.genre}</Text>
-        ) : null}
-        {item.packTitle ? (
-          <Text style={styles.packSubtitle} numberOfLines={1}>{item.packTitle}</Text>
-        ) : null}
-      </TouchableOpacity>
+        t={t}
+      />
     );
-  };
+  }, [
+    cardWidth, queueIndexMap, parentalStoryLimit, queue.length,
+    sourceNameById, packThumbnailById, toggleSelect, t,
+  ]);
 
   const renderFilterChip = (key, label, active, onPress) => (
     <TouchableOpacity
@@ -669,8 +667,9 @@ const StoriesScreen = () => {
         ]}
         columnWrapperStyle={numColumns > 1 ? styles.columnWrapper : undefined}
         renderItem={renderStory}
-        initialNumToRender={pageSize}
-        maxToRenderPerBatch={pageSize}
+        extraData={queue}
+        initialNumToRender={Math.min(10, pageSize)}
+        maxToRenderPerBatch={8}
         windowSize={5}
         removeClippedSubviews
         onEndReached={loadMoreStories}

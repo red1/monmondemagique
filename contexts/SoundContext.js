@@ -1,4 +1,4 @@
-import React, { createContext, useState, useContext, useEffect, useRef, useCallback } from 'react';
+import React, { createContext, useState, useContext, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
 
 const SoundContext = createContext();
@@ -101,7 +101,7 @@ export const SoundProvider = ({ children }) => {
     await resumeBackgroundMusic();
   }, [resumeBackgroundMusic]);
 
-  const playSound = async (type) => {
+  const playSound = useCallback(async (type) => {
     if (!soundEnabled || storyPlaybackRef.current) return;
 
     try {
@@ -123,7 +123,6 @@ export const SoundProvider = ({ children }) => {
           break;
         case 'pop':
           try {
-            // Utiliser click.mp3 (nom du fichier fourni par l'utilisateur)
             soundFile = require('../assets/sounds/click.mp3');
           } catch {
             console.log('⚠️ click.mp3 non trouvé - voir assets/sounds/README.md');
@@ -141,33 +140,36 @@ export const SoundProvider = ({ children }) => {
       }
 
       if (soundFile) {
-          const { sound } = await Audio.Sound.createAsync(soundFile);
-          await sound.playAsync();
-          // Unload after playback to free resources
-          sound.setOnPlaybackStatusUpdate(async (status) => {
-              if (status.didJustFinish) {
-                  await sound.unloadAsync();
-              }
-          });
+        const { sound } = await Audio.Sound.createAsync(soundFile);
+        await sound.playAsync();
+        sound.setOnPlaybackStatusUpdate(async (status) => {
+          if (status.didJustFinish) {
+            await sound.unloadAsync();
+          }
+        });
       }
     } catch (error) {
-      // Fail silently if files are missing
-      console.log("Sound error:", error.message);
+      console.log('Sound error:', error.message);
     }
-  };
+  }, [soundEnabled]);
+
+  const contextValue = useMemo(() => ({
+    soundEnabled,
+    setSoundEnabled,
+    musicEnabled,
+    setMusicEnabled,
+    playSound,
+    beginStoryPlayback,
+    endStoryPlayback,
+    pauseBackgroundMusic,
+    resumeBackgroundMusic,
+  }), [
+    soundEnabled, musicEnabled, playSound,
+    beginStoryPlayback, endStoryPlayback, pauseBackgroundMusic, resumeBackgroundMusic,
+  ]);
 
   return (
-    <SoundContext.Provider value={{ 
-        soundEnabled, 
-        setSoundEnabled, 
-        musicEnabled, 
-        setMusicEnabled,
-        playSound,
-        beginStoryPlayback,
-        endStoryPlayback,
-        pauseBackgroundMusic,
-        resumeBackgroundMusic,
-    }}>
+    <SoundContext.Provider value={contextValue}>
       {children}
     </SoundContext.Provider>
   );

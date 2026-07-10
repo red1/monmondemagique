@@ -10,9 +10,18 @@ import { useSounds } from './SoundContext';
 import { useLanguage } from './LanguageContext';
 import { getStrings } from '../constants/Strings';
 
-const StoryDownloadContext = createContext(null);
+const StoryDownloadProgressContext = createContext(null);
+const StoryDownloadActionsContext = createContext(null);
+const PROGRESS_THROTTLE_MS = 300;
 
-export const useStoryDownload = () => useContext(StoryDownloadContext);
+export const useStoryDownload = () => {
+  const progress = useContext(StoryDownloadProgressContext);
+  const actions = useContext(StoryDownloadActionsContext);
+  return { ...progress, ...actions };
+};
+
+export const useStoryDownloadProgress = () => useContext(StoryDownloadProgressContext);
+export const useStoryDownloadActions = () => useContext(StoryDownloadActionsContext);
 
 export function StoryDownloadProvider({ children }) {
   const { playSound } = useSounds();
@@ -23,8 +32,20 @@ export function StoryDownloadProvider({ children }) {
   const [packSizes, setPackSizes] = useState({});
   const handlesRef = useRef({});
   const countRef = useRef(0);
+  const lastProgressAtRef = useRef({});
 
   const setPackProgress = useCallback((packId, update) => {
+    const now = Date.now();
+    const progress = typeof update === 'object' && update !== null
+      ? update.progress
+      : update;
+    const isTerminal = progress >= 1 || update?.status === 'saving';
+    const lastAt = lastProgressAtRef.current[packId] || 0;
+    if (!isTerminal && now - lastAt < PROGRESS_THROTTLE_MS) {
+      return;
+    }
+    lastProgressAtRef.current[packId] = now;
+
     setDownloadProgress((prev) => {
       const prevEntry = prev[packId] || { progress: 0, status: 'preparing' };
       const next = typeof update === 'object' && update !== null
@@ -35,6 +56,7 @@ export function StoryDownloadProvider({ children }) {
   }, []);
 
   const clearPackProgress = useCallback((packId) => {
+    delete lastProgressAtRef.current[packId];
     setDownloadProgress((prev) => {
       const next = { ...prev };
       delete next[packId];
@@ -117,23 +139,25 @@ export function StoryDownloadProvider({ children }) {
     [downloadProgress],
   );
 
-  const value = useMemo(() => ({
+  const progressValue = useMemo(() => ({
     downloadProgress,
     packSizes,
-    setPackSizes,
     activeCount,
     isDownloading,
+  }), [downloadProgress, packSizes, activeCount, isDownloading]);
+
+  const actionsValue = useMemo(() => ({
+    setPackSizes,
     startDownload,
     cancelDownload,
     pauseDownload,
-  }), [
-    downloadProgress, packSizes, activeCount, isDownloading,
-    startDownload, cancelDownload, pauseDownload,
-  ]);
+  }), [startDownload, cancelDownload, pauseDownload]);
 
   return (
-    <StoryDownloadContext.Provider value={value}>
-      {children}
-    </StoryDownloadContext.Provider>
+    <StoryDownloadActionsContext.Provider value={actionsValue}>
+      <StoryDownloadProgressContext.Provider value={progressValue}>
+        {children}
+      </StoryDownloadProgressContext.Provider>
+    </StoryDownloadActionsContext.Provider>
   );
 }

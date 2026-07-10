@@ -1,221 +1,197 @@
-# 🎨 Mon Monde Magique ✨
+# Mon Monde Magique
 
-Application éducative et ludique en français pour enfants de 5 ans, optimisée pour tablettes et mobiles Android/iOS.
+Application éducative et ludique pour enfants (5–10 ans), en **français** et **anglais**, optimisée pour **tablettes** Android et iOS.
 
-## 📋 Description
+---
 
-**Mon Monde Magique** est une application Expo/React Native conçue pour offrir une expérience éducative joyeuse avec :
+## Fonctionnalités
 
-- 🖍️ **Coloriage Magique** : Transformez des photos en dessins au trait et coloriez avec des effets paillettes
-- ➕ **Jeu de Calculs** : Apprendre les mathématiques de manière progressive et ludique
-- 🧩 **Logique & Formes** : Jeu de glisser-déposer pour reconnaître les formes
-- 🔍 **7 Différences** : Trouver les différences entre deux images
-- 📝 **Le Pendu** : Deviner des mots en français
+### Jeux et activités
 
-## 🏗️ Architecture du Projet
+| Module | Description |
+|--------|-------------|
+| **Coloriage magique** | Photos → dessin au trait, palette 12 couleurs, paillettes, gomme, galerie |
+| **Calculs** | Mathématiques progressives avec tutoriels |
+| **Logique & formes** | Glisser-déposer, reconnaissance des formes |
+| **7 différences** | Trouver les différences entre deux images |
+| **Pendu** | Mots en français |
+| **Connect 4** | Puissance 4 |
+| **Puzzles** | Plusieurs niveaux de difficulté |
+| **Blagues & lecture** | Contenus ludiques |
+
+### Histoires et musiques (Lunii)
+
+Module complet de **bibliothèque audio** avec plus de **200 packs** téléchargeables :
+
+- **Catalogue** : packs « Raconte moi une histoire » (MEGA), vignettes, tailles, filtres
+- **Téléchargement** : MEGA natif + extraction en streaming (décryptage + dézip par blocs)
+- **Bibliothèque locale** : histoires et chansons extraites des packs Lunii (`story.json` + MP3)
+- **Filtres** : nom, source, type (histoire/chanson), artiste, album, genre, **pack**, durée
+- **File d’attente** : sélection multiple, réordonnancement, lecture séquentielle
+- **Lecteur** : timeline cliquable, pochette, précédent/suivant, pause, reprise
+- **Progression** : sauvegarde **par histoire** dans une playlist (reprendre où on s’est arrêté)
+- **Playlists nommées** : enregistrer, lister, supprimer, reprendre une playlist sauvegardée
+- **Contrôle parental** : limite d’histoires, minuterie, verrouillage PIN, compteur remis à zéro sur nouvelle playlist
+- **Vignettes** : extraction locale depuis MP3 / pack, réparation automatique des URLs expirées
+
+### Audio et interface
+
+- Musique de fond en boucle, sons d’effets (clic, succès, erreur, victoire)
+- Fond animé pastel, police **Fredoka-SemiBold**, boutons glossy
+- Bilingue FR/EN (`constants/Strings.js`)
+
+---
+
+## Architecture
 
 ```
 MonMondeMagique/
-├── app/                    # Routes Expo Router
-│   ├── _layout.js         # Configuration navigation + fonts
-│   ├── index.js           # Route principale (→ HomeScreen)
-│   ├── coloring.js        # Route coloriage refactorisé
-│   ├── math.js            # Jeu de calculs
-│   ├── logic.js           # Jeu de logique
-│   ├── diff.js            # Jeu des différences
-│   ├── hangman.js         # Jeu du pendu
-│   └── library.js         # Bibliothèque d'images
-│
+├── app/                      # Routes Expo Router
+│   ├── stories.js            # Bibliothèque locale
+│   ├── story_packages.js     # Catalogue / téléchargements
+│   ├── story_player.js       # Lecteur audio
+│   └── …                     # Jeux (math, hangman, coloring, …)
 ├── src/
+│   ├── screens/              # Écrans principaux
 │   ├── components/
-│   │   ├── shared/
-│   │   │   ├── GlossyButton.js      # Bouton brillant réutilisable
-│   │   │   └── Header.js            # En-tête avec retour
-│   │   └── coloring/
-│   │       ├── SimpleColoringCanvas.js  # Canvas SVG performant
-│   │       └── GlitterBrush.js          # Effets paillettes
-│   │
-│   ├── screens/
-│   │   ├── HomeScreen.js             # Écran d'accueil principal
-│   │   ├── ColoringScreen.js         # Écran de coloriage
-│   │   └── PlaceholderScreen.js      # Écrans temporaires
-│   │
+│   │   ├── shared/           # Header, StoryCoverImage, bannières…
+│   │   └── stories/          # Queue, modales playlists, StoryGridCard
+│   ├── services/
+│   │   ├── storyService.js   # Bibliothèque, téléchargements, progression
+│   │   ├── megaFile.js       # Pipeline MEGA (download → decrypt → unzip)
+│   │   ├── zipExtract.js     # Extraction zip streaming + file d’écriture
+│   │   ├── mp3Metadata.js    # Durée, tags ID3, pochettes MP3
+│   │   └── luniiStoryParser.js
 │   └── utils/
-│       └── imageFilters.js           # Traitement d'images
-│
 ├── contexts/
-│   └── SoundContext.js    # Gestion globale du son/musique
-│
+│   ├── SoundContext.js
+│   ├── LanguageContext.js
+│   ├── ParentalControlContext.js
+│   └── StoryDownloadContext.js
 ├── assets/
-│   ├── fonts/            # Fredoka-SemiBold.ttf
-│   ├── music/            # music.ai.mp3
-│   └── coloriages/       # Images PNG pour coloriage
-│
-└── constants/
-    └── Strings.js        # Textes en français
+│   ├── stories/catalog.json  # ~200 packs Lunii
+│   ├── coloriages/
+│   ├── music/
+│   └── sounds/
+└── constants/Strings.js
 ```
 
-## 🚀 Installation et Démarrage
+### Flux histoires
+
+```
+catalog.json → StoryPackagesScreen → downloadPackage()
+    → MEGA (pack.enc) ou HTTP (pack.zip)
+    → extraction streaming (fflate, 8 Mo/bloc, 8 écritures parallèles)
+    → story.json + assets/*.mp3
+    → AsyncStorage + library-index.json
+    → StoriesScreen → StoryPlayerScreen
+```
+
+---
+
+## Installation
 
 ### Prérequis
 
-- Node.js (v16+)
+- Node.js 18+
 - npm ou yarn
-- Expo CLI : `npm install -g expo-cli`
+- Expo CLI (`npx expo`)
 
-### Installation
+### Démarrage
 
 ```bash
 cd MonMondeMagique
 npm install
-```
-
-### Lancement
-
-```bash
 npx expo start
 ```
 
-Puis :
-- Pressez `i` pour iOS Simulator
-- Pressez `a` pour Android Emulator
-- Scannez le QR code avec Expo Go sur votre appareil
+- `a` → Android | `i` → iOS | QR code → Expo Go
 
-## 🎨 Fonctionnalités Principales
-
-### 1. Coloriage Magique 🖍️
-
-- **Transformation Photo → Sketch** : Convertit automatiquement une photo en dessin au trait
-- **Effet Paillettes** : Brosse de coloriage avec texture scintillante (sans shaders complexes)
-- **Sélection d'image** :
-  - Prendre une photo
-  - Choisir depuis la galerie
-  - Page blanche pour dessin libre
-  - Bibliothèque d'images pré-chargées
-- **Sauvegarde** : Enregistre dans la galerie et la bibliothèque de l'app
-
-### 2. Jeux Éducatifs 🎮
-
-- **Progression automatique** : Difficulté croissante par paliers
-- **Tutoriels intégrés** : Explications à chaque nouvelle étape
-- **Sons et animations** : Feedback visuel et sonore encourageant
-
-### 3. Design & UX
-
-- **Interface pastel joyeuse** : Dégradés roses/pêche avec étoiles scintillantes
-- **Boutons brillants** : Effet glossy avec animations bounce
-- **Police personnalisée** : Fredoka-SemiBold pour une ambiance ludique
-- **Musique de fond** : Loop continu avec contrôle dans les paramètres
-
-## 🔧 Technologies Utilisées
-
-- **Framework** : Expo SDK ~50.0
-- **Navigation** : Expo Router ~3.4
-- **Dessin** : react-native-svg (performant, évite les shaders)
-- **Images** : expo-image-picker, expo-image-manipulator
-- **Audio** : expo-av
-- **Stockage** : @react-native-async-storage/async-storage
-- **Animations** : React Native Animated API
-
-## 🐛 Corrections Apportées
-
-### ❌ Erreur Corrigée : `Cannot find native module 'ExpoLinking'`
-
-**Solution** : Installation de `expo-linking` via npm
+### Build production (EAS)
 
 ```bash
-npm install expo-linking
+eas build --platform android --profile production
+eas build --platform ios --profile production
 ```
 
-### ❌ Erreur Corrigée : `Uniforms size differs` (Shader)
+Configuration : `eas.json`, projet Expo `clevercontent-llc/magic-world`.
 
-**Solution** : Remplacement des shaders complexes par **react-native-svg**
+### Scripts utiles
 
-- Utilisation de SVG Path pour le dessin
-- Effets visuels via gradients et ombres CSS
-- Bien plus stable et performant
-
-### ✅ Architecture Refactorisée
-
-- Séparation claire des responsabilités
-- Composants réutilisables
-- Code commenté et maintenable
-- Navigation simplifiée
-
-## 📱 Compatibilité
-
-- ✅ **iOS** : iPhone & iPad (iOS 13+)
-- ✅ **Android** : Smartphones & Tablettes (Android 5.0+)
-- ✅ **Optimisé** : Tablettes (écran large)
-
-## 🎵 Assets Requis
-
-### Sons (à ajouter dans `assets/sounds/`)
-
-Créez les fichiers audio suivants (MP3, 1-2 secondes) :
-
-- `pop.mp3` : Clic de bouton
-- `success.mp3` : Bonne réponse
-- `wrong.mp3` : Mauvaise réponse
-- `win.mp3` : Victoire/niveau terminé
-
-### Musique
-
-- ✅ `assets/music/music.ai.mp3` (déjà présent)
-
-## 🎨 Personnalisation
-
-### Ajouter des Images de Coloriage
-
-1. Ajoutez vos fichiers PNG dans `assets/coloriages/`
-2. L'app les chargera automatiquement au démarrage
-3. Format recommandé : dessins au trait noir sur fond blanc
-
-### Modifier les Couleurs
-
-Éditez `src/screens/ColoringScreen.js`, section `colors` :
-
-```javascript
-const colors = [
-  '#FF69B4', // Rose
-  '#FFD700', // Or
-  // ... ajoutez vos couleurs
-];
+```bash
+npm test                    # Jest
+npm run guard               # Tests + validation
+npm run extract-stories     # Régénérer catalog.json depuis la source Lunii
 ```
-
-## 📝 Notes de Développement
-
-### Solution Technique : Coloriage sans Shaders
-
-Au lieu d'utiliser `@shopify/react-native-skia` avec des shaders GLSL complexes (source d'erreurs), nous avons opté pour **react-native-svg** :
-
-**Avantages** :
-- ✅ Stable et bien maintenu
-- ✅ Performant pour le dessin vectoriel
-- ✅ Pas de problèmes d'uniformes ou de compatibilité GPU
-- ✅ Effets visuels simples (gradients, ombres)
-
-**Compromis** :
-- ⚠️ Effet "paillettes" simulé (pas de vraie texture procédurale)
-- ⚠️ Animation des particules plus simple
-
-### Photo-to-Sketch
-
-La conversion photo → dessin utilise `expo-image-manipulator` pour optimiser l'image. Pour un vrai effet sketch (edge detection), une bibliothèque tierce comme `react-native-image-filter-kit` pourrait être ajoutée.
-
-## 🤝 Contribution
-
-Pour toute question ou amélioration :
-
-1. Créez une branche : `git checkout -b feature/ma-fonctionnalite`
-2. Committez vos changements : `git commit -m "Ajout: ..."`
-3. Pushez : `git push origin feature/ma-fonctionnalite`
-
-## 📄 Licence
-
-© 2024 Mon Monde Magique - Application éducative
 
 ---
 
-**Développé avec ❤️ pour rendre l'apprentissage magique !** ✨
+## Téléchargements et performances
 
+Les téléchargements s’exécutent en **arrière-plan** avec :
+
+- Téléchargement natif (`expo-file-system` resumable)
+- Décryptage/dézip **par blocs de 8 Mo** (pas de chargement complet en RAM)
+- **8 écritures fichiers en parallèle** (file partagée)
+- `yieldToEventLoop()` entre blocs → **tablette utilisable** pendant l’extraction
+- Progression UI limitée à **300 ms** pour éviter les re-renders
+
+Voir **[PERFORMANCE.md](./PERFORMANCE.md)** pour le détail des optimisations UI et bibliothèque.
+
+---
+
+## Stockage des histoires
+
+| Clé / fichier | Contenu |
+|---------------|---------|
+| `{documentDirectory}stories/` | Packs extraits par `packId` |
+| `library-index.json` | Index rapide de la bibliothèque |
+| `STORIES_META` (AsyncStorage) | Métadonnées par histoire |
+| `STORIES_PACKAGES_META` | Packs installés |
+| `STORIES_PROGRESS` | Progression lecture (par histoire) |
+| `STORIES_SAVED_PLAYLISTS` | Playlists nommées + progression |
+
+---
+
+## Technologies
+
+| Domaine | Stack |
+|---------|--------|
+| Framework | Expo SDK 50, React Native 0.73 |
+| Navigation | Expo Router 3 |
+| Audio | expo-av, slider timeline |
+| Fichiers | expo-file-system, fflate, megajs |
+| Dessin | react-native-svg |
+| Stockage | AsyncStorage |
+| Tests | Jest, React Native Testing Library |
+
+---
+
+## Personnalisation
+
+### Coloriages
+
+Ajoutez des PNG dans `assets/coloriages/` (traits noirs sur fond blanc).
+
+### Sons
+
+Placez dans `assets/sounds/` : `click.mp3`, `success.mp3`, `wrong.mp3`, `win.mp3`  
+(voir `assets/sounds/README.md`).
+
+### Catalogue histoires
+
+`assets/stories/catalog.json` — généré via `scripts/extract-conty-catalog.js`.
+
+---
+
+## Documentation complémentaire
+
+- [IMPROVEMENTS.md](./IMPROVEMENTS.md) — améliorations avancées (sons, shaders, etc.)
+- [CHANGELOG.md](./CHANGELOG.md) — historique des versions
+- [PERFORMANCE.md](./PERFORMANCE.md) — optimisations performances (juillet 2026)
+
+---
+
+## Licence
+
+© Mon Monde Magique — application éducative pour enfants.

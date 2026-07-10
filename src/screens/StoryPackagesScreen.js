@@ -16,7 +16,7 @@ import { getStrings } from '../../constants/Strings';
 import {
   getSources, filterPackages,
   getPackagesMeta, deletePackage, getCatalogInstallStates,
-  fetchPackageSizes, formatBytes,
+  fetchPackageSizes, formatBytes, getSourceById,
 } from '../services/storyService';
 
 export default function StoryPackagesScreen() {
@@ -129,7 +129,7 @@ export default function StoryPackagesScreen() {
     const progress = dl?.progress ?? 0;
     const statusKey = dl?.status ?? 'preparing';
     const statusLabel = (t.storiesDownloadStatus || getStrings('fr').storiesDownloadStatus)[statusKey] || statusKey;
-    const sourceName = sources.find((s) => s.id === item.source)?.name || item.source;
+    const sourceName = getSourceById(item.source)?.name || item.source;
     const sizeBytes = packSizes[item.id];
     const sizeLabel = sizeBytes ? formatBytes(sizeBytes) : null;
     const bytesWritten = dl?.bytesWritten;
@@ -292,6 +292,10 @@ export default function StoryPackagesScreen() {
         contentContainerStyle={[styles.listContent, { paddingBottom: Math.max(insets.bottom, 16) }]}
         columnWrapperStyle={numColumns > 1 ? styles.columnWrapper : undefined}
         renderItem={renderPackage}
+        initialNumToRender={12}
+        maxToRenderPerBatch={8}
+        windowSize={7}
+        removeClippedSubviews
       />
     </View>
   );

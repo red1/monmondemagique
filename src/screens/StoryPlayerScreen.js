@@ -20,7 +20,7 @@ import { getStrings } from '../../constants/Strings';
 import {
   getDownloadedStories, buildPlaylist, savePlaybackProgress,
   loadPlaybackProgress, clearPlaybackProgress, MIN_PLAYABLE_DURATION_MS,
-  resolveStoryDisplayThumbnail, getSavedPlaylistProgress, clearSavedPlaylistProgress,
+  getSavedPlaylistProgress, clearSavedPlaylistProgress,
   recordPackUsage, getStoryResumePosition,
 } from '../services/storyService';
 import { safeGoBack } from '../utils/safeNavigation';
@@ -99,6 +99,8 @@ export default function StoryPlayerScreen() {
   const [warningShown, setWarningShown] = useState(false);
   const [ready, setReady] = useState(false);
 
+  const lastPlaybackUiRef = useRef(0);
+  const positionMsRef = useRef(0);
   const soundRef = useRef(null);
   const totalRemainingRef = useRef(0);
   const playlistRef = useRef([]);
@@ -172,13 +174,6 @@ export default function StoryPlayerScreen() {
     exitProgressSavedRef.current = false;
     const meta = await getDownloadedStories();
     let pl = buildPlaylist(playlistIds, meta);
-    pl = await Promise.all(pl.map(async (item) => {
-      if (item.thumbnail) return item;
-      const storyMeta = meta[item.storyId];
-      if (!storyMeta) return item;
-      const thumbnail = await resolveStoryDisplayThumbnail(storyMeta);
-      return thumbnail ? { ...item, thumbnail } : item;
-    }));
 
     const progress = await loadPlaybackProgress();
     const shouldResume = params.resume === '1';
@@ -383,24 +378,22 @@ export default function StoryPlayerScreen() {
 
     sound.setOnPlaybackStatusUpdate((status) => {
       if (!status.isLoaded || sessionId !== playbackSessionRef.current) return;
-      if (!seekingRef.current) {
-        setPositionMs(status.positionMillis || 0);
-      }
-      setDurationMs(status.durationMillis || 0);
-      setIsPlaying(status.isPlaying);
+
+      const pos = status.positionMillis || 0;
+      positionMsRef.current = pos;
 
       totalRemainingRef.current = computeTotalRemaining(
         playlistRef.current,
         storyIndexRef.current,
         trackIndexRef.current,
-        status.positionMillis || 0,
+        pos,
       );
 
       const storyRemaining = computeCurrentStoryRemaining(
         playlistRef.current,
         storyIndexRef.current,
         trackIndexRef.current,
-        status.positionMillis || 0,
+        pos,
       );
 
       if (!warningShownRef.current && totalRemainingRef.current <= WARNING_SECONDS * 1000 && totalRemainingRef.current > 0) {
@@ -410,6 +403,18 @@ export default function StoryPlayerScreen() {
       } else if (!warningShownRef.current && shouldWarnForStoryEnd(storyRemaining)) {
         warningShownRef.current = true;
         triggerWarning();
+      }
+
+      const now = Date.now();
+      const shouldRefreshUi = status.didJustFinish
+        || now - lastPlaybackUiRef.current >= 250;
+      if (shouldRefreshUi) {
+        lastPlaybackUiRef.current = now;
+        if (!seekingRef.current) {
+          setPositionMs(pos);
+        }
+        setDurationMs(status.durationMillis || 0);
+        setIsPlaying(status.isPlaying);
       }
 
       if (status.didJustFinish) {

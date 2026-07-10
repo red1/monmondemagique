@@ -1,8 +1,32 @@
 import { Buffer } from 'buffer';
 import * as FileSystem from 'expo-file-system';
+import { Unzip, UnzipInflate } from 'fflate';
 
 export const MAX_SAFE_WRITE_BYTES = 12 * 1024 * 1024;
-export const MAX_WRITE_CONCURRENCY = 2;
+/** Parallel native file writes — disk I/O scales better than JS CPU work. */
+export const MAX_WRITE_CONCURRENCY = 8;
+/** Read zip/encrypted payloads in large chunks to cut bridge round-trips. */
+export const READ_CHUNK_SIZE = 8 * 1024 * 1024;
+
+let sharedWriteQueue = null;
+
+export function getSharedWriteQueue(concurrency = MAX_WRITE_CONCURRENCY) {
+  if (!sharedWriteQueue) {
+    sharedWriteQueue = createWriteQueue(concurrency);
+  }
+  return sharedWriteQueue;
+}
+
+/** Yield the JS thread so taps/animations stay responsive during heavy work. */
+export function yieldToEventLoop() {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => setTimeout(resolve, 0));
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+}
 
 export function normalizeZipEntryName(name) {
   return name.replace(/\\/g, '/').replace(/^\/+/, '');
@@ -44,6 +68,17 @@ export function createWriteQueue(concurrency = MAX_WRITE_CONCURRENCY) {
     queue.push({ task, resolve, reject });
     pump();
   });
+}
+
+function mergeParts(parts) {
+  const totalLen = parts.reduce((sum, part) => sum + part.length, 0);
+  const combined = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const part of parts) {
+    combined.set(part, offset);
+    offset += part.length;
+  }
+  return combined;
 }
 
 export async function ensureZipDirectory(destDir, name) {
@@ -104,4 +139,142 @@ export async function writeZipEntry(destDir, name, bytes, {
     encoding: FileSystem.EncodingType.Base64,
   });
   return { skipped: false };
+}
+
+/**
+ * Streaming zip extractor — never loads the full archive into JS memory.
+ * Yields between read chunks so the UI thread can process touches/frames.
+ */
+export function createStreamingUnzipSession(destDir, {
+  enqueueWrite = getSharedWriteQueue(),
+  control,
+  onFileExtracted,
+  onProgress,
+  formatBytes = (n) => `${n} B`,
+  log,
+} = {}) {
+  const unzip = new Unzip();
+  unzip.register(UnzipInflate);
+  const pendingWrites = [];
+  let fileCount = 0;
+  let unzipStarted = false;
+  let extractedCount = 0;
+
+  unzip.onfile = (entry) => {
+    control?.checkAborted?.();
+    const name = normalizeZipEntryName(entry.name);
+    fileCount += 1;
+
+    if (!unzipStarted) {
+      unzipStarted = true;
+      onProgress?.('unzipping');
+    }
+
+    if (name.endsWith('/')) {
+      pendingWrites.push(enqueueWrite(() => ensureZipDirectory(destDir, name)));
+      return;
+    }
+
+    const parts = [];
+    entry.ondata = (err, data, final) => {
+      if (err) throw err;
+      if (data?.length) parts.push(data);
+      if (final) {
+        pendingWrites.push(enqueueWrite(async () => {
+          control?.checkAborted?.();
+          const bytes = parts.length === 1 ? parts[0] : mergeParts(parts);
+          if (bytes.length === 0 && !isZipFileEntry(name)) {
+            await ensureZipDirectory(destDir, name);
+            return;
+          }
+          if (bytes.length === 0) return;
+
+          extractedCount += 1;
+          if (extractedCount % 4 === 0) {
+            onProgress?.('extracting', { extractedCount });
+            await yieldToEventLoop();
+          }
+
+          const result = await writeZipEntry(destDir, name, bytes, {
+            formatBytes,
+            originalSize: entry.originalSize,
+            skipIfValid: true,
+            onWrite: ({ name: entryName, size, skipped }) => {
+              if (!skipped) log?.('Extract file', { name: entryName, size: formatBytes(size) });
+            },
+          });
+          if (!result.skipped && onFileExtracted) await onFileExtracted(name);
+        }));
+      }
+    };
+    entry.start();
+  };
+
+  return {
+    unzip,
+    pushChunk(bytes, final) {
+      unzip.push(bytes, final);
+    },
+    async finish() {
+      await Promise.all(pendingWrites);
+      return { fileCount, writeCount: pendingWrites.length, extractedCount };
+    },
+  };
+}
+
+export async function streamUnzipFromFile(filePath, destDir, {
+  control,
+  onFileExtracted,
+  report,
+  formatBytes,
+  log,
+  progressStart = 0.55,
+  progressSpan = 0.38,
+} = {}) {
+  const zipInfo = await FileSystem.getInfoAsync(filePath, { size: true });
+  const totalSize = zipInfo.size || 0;
+  log?.('Stream unzip start', { path: filePath, size: formatBytes?.(totalSize) });
+
+  const phase = { progress: progressStart };
+  const session = createStreamingUnzipSession(destDir, {
+    control,
+    onFileExtracted,
+    formatBytes,
+    log,
+    onProgress: (status, extra) => {
+      report?.(phase.progress, status, { totalBytes: totalSize, ...extra });
+    },
+  });
+
+  let position = 0;
+  let lastYieldAt = 0;
+
+  while (position < totalSize) {
+    control?.checkAborted?.();
+    const length = Math.min(READ_CHUNK_SIZE, totalSize - position);
+    const b64 = await FileSystem.readAsStringAsync(filePath, {
+      encoding: FileSystem.EncodingType.Base64,
+      position,
+      length,
+    });
+    const isLast = position + length >= totalSize;
+    session.pushChunk(new Uint8Array(Buffer.from(b64, 'base64')), isLast);
+    position += length;
+
+    phase.progress = progressStart + (position / totalSize) * progressSpan;
+    report?.(
+      phase.progress,
+      position < totalSize * 0.15 ? 'unzipping' : 'extracting',
+      { bytesWritten: position, totalBytes: totalSize },
+    );
+
+    if (position - lastYieldAt >= READ_CHUNK_SIZE) {
+      lastYieldAt = position;
+      await yieldToEventLoop();
+    }
+  }
+
+  const result = await session.finish();
+  log?.('Stream unzip done', result);
+  return result;
 }

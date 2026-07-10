@@ -1,7 +1,6 @@
 import { Buffer } from 'buffer';
 import * as FileSystem from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { unzipSync } from 'fflate';
 import { megaDownloadAndExtract, cleanupMegaTempFiles, fetchMegaFileSize } from './megaFile';
 import { extractMp3CoverArt, extractMp3Tags, saveCoverArt, estimateMp3DurationFromBytes, reconcileDurationMs } from './mp3Metadata';
 import {
@@ -12,10 +11,7 @@ import {
   resolvePackAudioUri,
 } from './luniiStoryParser';
 import {
-  createWriteQueue,
-  isZipDirectoryEntry,
-  normalizeZipEntryName,
-  writeZipEntry,
+  streamUnzipFromFile,
 } from './zipExtract';
 import catalogData from '../../assets/stories/catalog.json';
 
@@ -64,12 +60,13 @@ let libraryBulkUpdateDepth = 0;
 export function notifyStoriesLibraryUpdated() {
   if (libraryBulkUpdateDepth > 0) return;
   if (libraryNotifyTimer) clearTimeout(libraryNotifyTimer);
+  const debounceMs = activeDownloadCount > 0 ? 2000 : 300;
   libraryNotifyTimer = setTimeout(() => {
     libraryNotifyTimer = null;
     libraryListeners.forEach((listener) => {
       try { listener(); } catch (_) { /* ignore */ }
     });
-  }, 300);
+  }, debounceMs);
 }
 
 function beginBulkLibraryUpdate() {
@@ -129,6 +126,38 @@ export function createDownloadControl() {
 }
 
 const catalog = catalogData;
+const packByIdMap = new Map((catalog.stories || []).map((p) => [p.id, p]));
+const sourceByIdMap = new Map((catalog.sources || []).map((s) => [s.id, s]));
+
+let storiesMetaCache = null;
+let packagesMetaCache = null;
+let libraryIndexUpdatedAt = 0;
+let activeDownloadCount = 0;
+const LIBRARY_FRESH_MS = 5 * 60 * 1000;
+
+export function getPackById(packId) {
+  return packByIdMap.get(packId) || null;
+}
+
+export function getSourceById(sourceId) {
+  return sourceByIdMap.get(sourceId) || null;
+}
+
+export function beginActiveDownload() {
+  activeDownloadCount += 1;
+}
+
+export function endActiveDownload() {
+  activeDownloadCount = Math.max(0, activeDownloadCount - 1);
+}
+
+function invalidateStoriesMetaCache() {
+  storiesMetaCache = null;
+}
+
+function invalidatePackagesMetaCache() {
+  packagesMetaCache = null;
+}
 
 export function getCatalog() {
   return catalog;
@@ -174,27 +203,38 @@ async function saveLibraryIndex(meta) {
   );
 }
 
-async function loadStoriesMeta() {
+async function loadStoriesMeta({ force = false } = {}) {
+  if (!force && storiesMetaCache) return storiesMetaCache;
+
   const fromIndex = await loadLibraryIndex();
-  if (fromIndex && Object.keys(fromIndex).length > 0) return fromIndex;
+  if (fromIndex && Object.keys(fromIndex).length > 0) {
+    storiesMetaCache = fromIndex;
+    return fromIndex;
+  }
 
   const raw = await AsyncStorage.getItem(STORIES_META_KEY);
   const meta = raw ? JSON.parse(raw) : {};
-  if (Object.keys(meta).length > 0) await saveLibraryIndex(meta);
+  if (Object.keys(meta).length > 0) await saveStoriesMeta(meta);
+  else storiesMetaCache = meta;
   return meta;
 }
 
 async function saveStoriesMeta(meta) {
+  storiesMetaCache = meta;
+  libraryIndexUpdatedAt = Date.now();
   await AsyncStorage.setItem(STORIES_META_KEY, JSON.stringify(meta));
   await saveLibraryIndex(meta);
 }
 
 async function loadPackagesMeta() {
+  if (packagesMetaCache) return packagesMetaCache;
   const raw = await AsyncStorage.getItem(PACKAGES_META_KEY);
-  return raw ? JSON.parse(raw) : {};
+  packagesMetaCache = raw ? JSON.parse(raw) : {};
+  return packagesMetaCache;
 }
 
 async function savePackagesMeta(meta) {
+  packagesMetaCache = meta;
   await AsyncStorage.setItem(PACKAGES_META_KEY, JSON.stringify(meta));
 }
 
@@ -206,18 +246,21 @@ function withMetaLock(task) {
   return run;
 }
 
-export async function getDownloadedStories() {
-  return loadStoriesMeta();
+export async function getDownloadedStories({ force = false } = {}) {
+  return loadStoriesMeta({ force });
 }
 
 export async function getPlayableStories({ syncOnLoad = false } = {}) {
   await migrateLegacyMeta();
+  const metaIsFresh = storiesMetaCache && Date.now() - libraryIndexUpdatedAt < LIBRARY_FRESH_MS;
   if (syncOnLoad) {
     await rebuildLibraryFromDisk({ incremental: false });
-  } else {
+  } else if (!metaIsFresh) {
     scheduleBackgroundLibrarySync();
   }
-  scheduleBackgroundMp3Enrich();
+  if (!metaIsFresh) {
+    scheduleBackgroundMp3Enrich();
+  }
   const meta = await loadStoriesMeta();
   return Object.values(meta).sort((a, b) => (a.title || '').localeCompare(b.title || ''));
 }
@@ -230,6 +273,7 @@ const MAX_BACKGROUND_ENRICH_ROUNDS = 20;
 
 function scheduleBackgroundLibrarySync() {
   if (backgroundSyncTimer || syncInFlight) return;
+  if (storiesMetaCache && Date.now() - libraryIndexUpdatedAt < LIBRARY_FRESH_MS) return;
   backgroundSyncTimer = setTimeout(async () => {
     backgroundSyncTimer = null;
     syncInFlight = true;
@@ -268,7 +312,7 @@ async function repairStoryThumbnails({ limit = 30 } = {}) {
     if (processed >= limit) break;
     if (!(await shouldRepairThumbnail(story))) continue;
 
-    const pack = getAllPackages().find((p) => p.id === story.packId);
+    const pack = getPackById(story.packId);
     if (!pack) continue;
 
     processed += 1;
@@ -529,6 +573,7 @@ async function resolveAudioFileInfo(track, packDir) {
 
 /** Log file sizes + duration resolution for stories (dev console). */
 export async function debugLogLibraryFileSizes() {
+  if (!__DEV__) return;
   const meta = await loadStoriesMeta();
   packLog('=== Library file size audit ===', { count: Object.keys(meta).length });
   for (const story of Object.values(meta)) {
@@ -895,7 +940,7 @@ async function enrichStoriesWithMp3Metadata({ limit = 20 } = {}) {
         updates.title = tags.title;
       }
       if (await shouldRepairThumbnail(story)) {
-        const pack = getAllPackages().find((p) => p.id === story.packId);
+        const pack = getPackById(story.packId);
         if (pack) {
           const thumb = await resolveStoryThumbnail(story, story.localPath, pack);
           if (thumb) updates.thumbnail = thumb;
@@ -1310,19 +1355,23 @@ function makeReporter(onProgress) {
 function createPartialSaver(packId, pack, packDir, report) {
   let lastSave = 0;
   let inFlight = false;
+  let filesSinceSave = 0;
 
   return async (fileName) => {
-    const isRelevant = !fileName || /\.(mp3|json|png|jpg|jpeg)$/i.test(fileName);
+    const isRelevant = !fileName || /\.(mp3|json)$/i.test(fileName);
     if (!isRelevant) return;
 
+    filesSinceSave += 1;
     const now = Date.now();
-    if (inFlight || now - lastSave < 2500) return;
+    const shouldSave = filesSinceSave >= 12 || now - lastSave >= 10000;
+    if (!shouldSave || inFlight || now - lastSave < 5000) return;
 
     inFlight = true;
     try {
-      const partial = await trySavePartialPack(packId, pack, packDir, { partial: true });
+      const partial = await trySavePartialPack(packId, pack, packDir, { partial: true, fast: true });
       if (partial?.stories?.length) {
         lastSave = Date.now();
+        filesSinceSave = 0;
         notifyStoriesLibraryUpdated();
         report?.(null, 'extracting', { storiesSaved: partial.stories.length });
       }
@@ -1393,44 +1442,18 @@ async function downloadFile(url, destPath, report, packId, control) {
 }
 
 async function unzipToDirectory(zipPath, destDir, packId, report, control, onFileExtracted) {
-  packLog('Unzip start', { packId, zipPath });
-  report?.(0.55, 'unzipping');
+  packLog('Stream unzip start', { packId, zipPath });
   const startedAt = Date.now();
-  const zipInfo = await FileSystem.getInfoAsync(zipPath, { size: true });
-  packLog('Zip file info', { size: formatBytes(zipInfo.size) });
-  report?.(0.55, 'unzipping', { totalBytes: zipInfo.size || null });
-
-  const base64 = await FileSystem.readAsStringAsync(zipPath, { encoding: FileSystem.EncodingType.Base64 });
-  control?.checkAborted?.();
-  const binary = base64ToUint8(base64);
-  const entries = unzipSync(binary);
-  const names = Object.keys(entries);
-  packLog('Zip entries found', { count: names.length, files: names.slice(0, 8), more: names.length > 8 ? names.length - 8 : 0 });
-
-  const enqueueWrite = createWriteQueue();
-  let index = 0;
-  await Promise.all(
-    Object.entries(entries).map(([name, data]) =>
-      enqueueWrite(async () => {
-        control?.checkAborted?.();
-        index += 1;
-        report?.(0.55 + (index / names.length) * 0.35, 'extracting');
-        if (isZipDirectoryEntry(normalizeZipEntryName(name), data.length, data.length)) {
-          packLog('Skip directory entry', { name });
-          return;
-        }
-        packLog('Extract file', { name, size: formatBytes(data.length) });
-        const result = await writeZipEntry(destDir, name, data, { formatBytes, originalSize: data.length, skipIfValid: true });
-        if (!result.skipped && onFileExtracted) await onFileExtracted(name);
-      }),
-    ),
-  );
-  packLog('Unzip done', { packId, files: names.length, elapsedMs: Date.now() - startedAt });
-}
-
-
-function base64ToUint8(base64) {
-  return new Uint8Array(Buffer.from(base64, 'base64'));
+  await streamUnzipFromFile(zipPath, destDir, {
+    control,
+    onFileExtracted,
+    report: (progress, status, extra) => report?.(progress, status, extra),
+    formatBytes,
+    log: packLog,
+    progressStart: 0.55,
+    progressSpan: 0.35,
+  });
+  packLog('Stream unzip done', { packId, elapsedMs: Date.now() - startedAt });
 }
 
 async function isStoryAudioValid(story) {
@@ -1645,7 +1668,9 @@ export function downloadPackage(packId, onProgress) {
 
 async function downloadPackageInternal(packId, onProgress, control) {
   const startedAt = Date.now();
-  const pack = getAllPackages().find((p) => p.id === packId);
+  beginActiveDownload();
+  try {
+  const pack = getPackById(packId) || getAllPackages().find((p) => p.id === packId);
   if (!pack) throw new Error('Pack introuvable');
 
   const report = makeReporter(onProgress);
@@ -1727,7 +1752,7 @@ async function downloadPackageInternal(packId, onProgress, control) {
 
     packLog('Parsing story.json…');
     const storyJson = JSON.parse(await FileSystem.readAsStringAsync(storyJsonPath));
-    let extractedStories = await extractPlayableStoriesFromPack(storyJson, packDir, pack);
+    let extractedStories = await extractPlayableStoriesFromPack(storyJson, packDir, pack, { fast: true });
 
     if (extractedStories.length === 0 && preCheck.stories.length > 0) {
       packLog('Keeping previously extracted stories after failed re-parse', {
@@ -1798,6 +1823,9 @@ async function downloadPackageInternal(packId, onProgress, control) {
       packLog('Partial save failed', { packId, message: saveErr.message });
     }
     throw e;
+  }
+  } finally {
+    endActiveDownload();
   }
 }
 
@@ -2125,7 +2153,7 @@ export async function getSavedPlaylistProgress(playlistId) {
 export function getStoryDisplayThumbnail(story) {
   if (!story) return null;
   if (story.thumbnail && !isRemoteMediaUri(story.thumbnail)) return story.thumbnail;
-  const pack = story.packId ? getAllPackages().find((p) => p.id === story.packId) : null;
+  const pack = story.packId ? getPackById(story.packId) : null;
   if (story.thumbnail) return story.thumbnail;
   return pack?.thumbnail || null;
 }
@@ -2134,7 +2162,7 @@ export async function resolveStoryDisplayThumbnail(story) {
   const immediate = getStoryDisplayThumbnail(story);
   if (immediate) return immediate;
   if (!story?.localPath || !story?.packId) return null;
-  const pack = getAllPackages().find((p) => p.id === story.packId);
+  const pack = getPackById(story.packId);
   if (!pack) return null;
   return resolveStoryThumbnail(story, story.localPath, pack);
 }

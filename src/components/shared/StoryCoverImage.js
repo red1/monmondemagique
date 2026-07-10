@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { memo, useEffect, useState } from 'react';
 import { View, Image, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
-export default function StoryCoverImage({
+function StoryCoverImage({
   thumbnail, fallbackThumbnail, contentType, style, placeholderStyle,
 }) {
   const [uri, setUri] = useState(thumbnail || null);
@@ -39,6 +39,8 @@ export default function StoryCoverImage({
     />
   );
 }
+
+export default memo(StoryCoverImage);
 
 const styles = StyleSheet.create({
   placeholder: {
