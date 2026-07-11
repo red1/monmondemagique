@@ -5,7 +5,9 @@ import * as Brightness from 'expo-brightness';
 const STORAGE_KEY = 'PARENTAL_SESSION';
 const PIN_KEY = 'PARENTAL_PIN';
 export const PARENTAL_PREFS_KEY = 'PARENTAL_PREFS';
-export const DEFAULT_PARENTAL_PREFS = { mode: 'timer', timerMinutes: 10, storyCount: 3 };
+export const DEFAULT_PARENTAL_PREFS = {
+  mode: 'timer', timerMinutes: 10, storyCount: 3, videoCount: 3,
+};
 const DEFAULT_PIN = '1234';
 const WARNING_MS = 30 * 1000;
 
@@ -22,6 +24,7 @@ export async function loadParentalPrefs() {
       mode: parsed.mode === 'stories' ? 'stories' : 'timer',
       timerMinutes: Math.min(180, Math.max(1, Number(parsed.timerMinutes) || DEFAULT_PARENTAL_PREFS.timerMinutes)),
       storyCount: Math.min(20, Math.max(1, Number(parsed.storyCount) || DEFAULT_PARENTAL_PREFS.storyCount)),
+      videoCount: Math.min(20, Math.max(1, Number(parsed.videoCount) || DEFAULT_PARENTAL_PREFS.videoCount)),
     };
   } catch (_) {
     return { ...DEFAULT_PARENTAL_PREFS };
@@ -33,6 +36,7 @@ export async function saveParentalPrefs(prefs) {
     mode: prefs.mode === 'stories' ? 'stories' : 'timer',
     timerMinutes: Math.min(180, Math.max(1, Number(prefs.timerMinutes) || DEFAULT_PARENTAL_PREFS.timerMinutes)),
     storyCount: Math.min(20, Math.max(1, Number(prefs.storyCount) || DEFAULT_PARENTAL_PREFS.storyCount)),
+    videoCount: Math.min(20, Math.max(1, Number(prefs.videoCount) || DEFAULT_PARENTAL_PREFS.videoCount)),
   }));
 }
 
@@ -86,7 +90,7 @@ export function ParentalControlProvider({ children }) {
     } catch (_) { /* ignore */ }
   }, []);
 
-  const activateSession = useCallback(async ({ mode, value, parentPin }) => {
+  const activateSession = useCallback(async ({ mode, value, videoValue, parentPin }) => {
     const currentPin = await loadPin();
     if (parentPin !== currentPin) {
       throw new Error('INVALID_PIN');
@@ -95,8 +99,10 @@ export function ParentalControlProvider({ children }) {
       active: true,
       mode,
       value,
+      videoValue: mode === 'stories' ? (videoValue ?? value) : undefined,
       startedAt: Date.now(),
       storiesPlayed: 0,
+      videosPlayed: 0,
       warningShown: false,
     };
     warningShownRef.current = false;
@@ -104,6 +110,75 @@ export function ParentalControlProvider({ children }) {
     setShowWarning(false);
     await persistSession(next);
   }, [persistSession]);
+
+  const restoreBrightness = useCallback(async () => {
+    try {
+      if (originalBrightnessRef.current != null) {
+        await Brightness.setBrightnessAsync(originalBrightnessRef.current);
+        originalBrightnessRef.current = null;
+      }
+    } catch (_) { /* ignore */ }
+  }, []);
+
+  const resetSessionAndUnlock = useCallback(async () => {
+    const raw = await AsyncStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      warningShownRef.current = false;
+      setIsLocked(false);
+      setShowWarning(false);
+      setRemainingMs(null);
+      await restoreBrightness();
+      return;
+    }
+
+    let current;
+    try { current = JSON.parse(raw); } catch {
+      warningShownRef.current = false;
+      setIsLocked(false);
+      setShowWarning(false);
+      setRemainingMs(null);
+      await restoreBrightness();
+      return;
+    }
+
+    if (!current?.active) {
+      warningShownRef.current = false;
+      setIsLocked(false);
+      setShowWarning(false);
+      setRemainingMs(null);
+      await restoreBrightness();
+      return;
+    }
+
+    const prefs = await loadParentalPrefs();
+    let next;
+    if (current.mode === 'timer') {
+      next = {
+        ...current,
+        mode: 'timer',
+        value: prefs.timerMinutes,
+        startedAt: Date.now(),
+        warningShown: false,
+      };
+    } else {
+      next = {
+        ...current,
+        mode: 'stories',
+        value: prefs.storyCount,
+        videoValue: prefs.videoCount,
+        storiesPlayed: 0,
+        videosPlayed: 0,
+        warningShown: false,
+      };
+    }
+
+    warningShownRef.current = false;
+    setIsLocked(false);
+    setShowWarning(false);
+    setRemainingMs(current.mode === 'timer' ? next.value * 60 * 1000 : null);
+    await persistSession(next);
+    await restoreBrightness();
+  }, [persistSession, restoreBrightness]);
 
   const deactivateSession = useCallback(async (parentPin) => {
     const currentPin = await loadPin();
@@ -115,17 +190,20 @@ export function ParentalControlProvider({ children }) {
     setShowWarning(false);
     setRemainingMs(null);
     await persistSession(null);
-    try {
-      if (originalBrightnessRef.current != null) {
-        await Brightness.setBrightnessAsync(originalBrightnessRef.current);
-        originalBrightnessRef.current = null;
-      }
-    } catch (_) { /* ignore */ }
-  }, [persistSession]);
+    await restoreBrightness();
+  }, [persistSession, restoreBrightness]);
 
   const unlockScreen = useCallback(async (parentPin) => {
-    await deactivateSession(parentPin);
-  }, [deactivateSession]);
+    const currentPin = await loadPin();
+    if (parentPin !== currentPin) {
+      throw new Error('INVALID_PIN');
+    }
+    await resetSessionAndUnlock();
+  }, [resetSessionAndUnlock]);
+
+  const unlockAfterMathVerification = useCallback(async () => {
+    await resetSessionAndUnlock();
+  }, [resetSessionAndUnlock]);
 
   const changePin = useCallback(async (currentPinInput, newPin) => {
     const currentPin = await loadPin();
@@ -164,6 +242,24 @@ export function ParentalControlProvider({ children }) {
     return false;
   }, [persistSession, lockScreen]);
 
+  const recordVideoCompleted = useCallback(async () => {
+    const raw = await AsyncStorage.getItem(STORAGE_KEY);
+    if (!raw) return false;
+    let current;
+    try { current = JSON.parse(raw); } catch { return false; }
+    if (!current?.active || current.mode !== 'stories') return false;
+
+    const videoLimit = current.videoValue ?? current.value;
+    const nextCount = (current.videosPlayed || 0) + 1;
+    const next = { ...current, videosPlayed: nextCount };
+    await persistSession(next);
+    if (nextCount >= videoLimit) {
+      await lockScreen();
+      return true;
+    }
+    return false;
+  }, [persistSession, lockScreen]);
+
   const resetStoriesPlayed = useCallback(async () => {
     const raw = await AsyncStorage.getItem(STORAGE_KEY);
     if (!raw) {
@@ -191,9 +287,42 @@ export function ParentalControlProvider({ children }) {
     } catch (_) { /* ignore */ }
   }, [persistSession]);
 
+  const resetVideosPlayed = useCallback(async () => {
+    const raw = await AsyncStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      setIsLocked(false);
+      setShowWarning(false);
+      return;
+    }
+    let current;
+    try { current = JSON.parse(raw); } catch { return; }
+    if (!current?.active || current.mode !== 'stories') return;
+
+    warningShownRef.current = false;
+    setIsLocked(false);
+    setShowWarning(false);
+    await persistSession({
+      ...current,
+      videosPlayed: 0,
+      warningShown: false,
+    });
+    try {
+      if (originalBrightnessRef.current != null) {
+        await Brightness.setBrightnessAsync(originalBrightnessRef.current);
+        originalBrightnessRef.current = null;
+      }
+    } catch (_) { /* ignore */ }
+  }, [persistSession]);
+
   const getStoriesRemaining = useCallback(() => {
     if (!session?.active || session.mode !== 'stories') return null;
     return Math.max(0, session.value - (session.storiesPlayed || 0));
+  }, [session]);
+
+  const getVideosRemaining = useCallback(() => {
+    if (!session?.active || session.mode !== 'stories') return null;
+    const limit = session.videoValue ?? session.value;
+    return Math.max(0, limit - (session.videosPlayed || 0));
   }, [session]);
 
   const shouldWarnForStoryEnd = useCallback((remainingAudioMs) => {
@@ -202,9 +331,21 @@ export function ParentalControlProvider({ children }) {
     return remaining === 1 && remainingAudioMs <= WARNING_MS && remainingAudioMs > 0;
   }, [session, getStoriesRemaining]);
 
+  const shouldWarnForVideoEnd = useCallback((remainingVideoMs) => {
+    if (!session?.active || session.mode !== 'stories') return false;
+    const remaining = getVideosRemaining();
+    return remaining === 1 && remainingVideoMs <= WARNING_MS && remainingVideoMs > 0;
+  }, [session, getVideosRemaining]);
+
   const isStoryLimitReached = useCallback(() => {
     if (!session?.active || session.mode !== 'stories') return false;
     return (session.storiesPlayed || 0) >= session.value;
+  }, [session]);
+
+  const isVideoLimitReached = useCallback(() => {
+    if (!session?.active || session.mode !== 'stories') return false;
+    const limit = session.videoValue ?? session.value;
+    return (session.videosPlayed || 0) >= limit;
   }, [session]);
 
   useEffect(() => {
@@ -253,13 +394,19 @@ export function ParentalControlProvider({ children }) {
     activateSession,
     deactivateSession,
     unlockScreen,
+    unlockAfterMathVerification,
     changePin,
     resetPin,
     recordStoryCompleted,
+    recordVideoCompleted,
     resetStoriesPlayed,
+    resetVideosPlayed,
     getStoriesRemaining,
+    getVideosRemaining,
     shouldWarnForStoryEnd,
+    shouldWarnForVideoEnd,
     isStoryLimitReached,
+    isVideoLimitReached,
     dismissWarning,
     triggerWarning,
     lockScreen,
@@ -267,9 +414,10 @@ export function ParentalControlProvider({ children }) {
     mode: session?.mode || 'off',
   }), [
     pin, session, isLocked, showWarning, remainingMs,
-    activateSession, deactivateSession, unlockScreen, changePin, resetPin,
-    recordStoryCompleted, resetStoriesPlayed, getStoriesRemaining, shouldWarnForStoryEnd,
-    isStoryLimitReached, dismissWarning, triggerWarning, lockScreen,
+    activateSession, deactivateSession, unlockScreen, unlockAfterMathVerification, changePin, resetPin,
+    recordStoryCompleted, recordVideoCompleted, resetStoriesPlayed, resetVideosPlayed,
+    getStoriesRemaining, getVideosRemaining, shouldWarnForStoryEnd, shouldWarnForVideoEnd,
+    isStoryLimitReached, isVideoLimitReached, dismissWarning, triggerWarning, lockScreen,
   ]);
 
   return (

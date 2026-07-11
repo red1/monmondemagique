@@ -131,10 +131,20 @@ const ColoringScreen = () => {
     }
   }, []);
 
+  const lastZoomSyncRef = useRef(0);
+
+  const syncZoomDuringGesture = useCallback(() => {
+    const now = Date.now();
+    if (now - lastZoomSyncRef.current < 48) return;
+    lastZoomSyncRef.current = now;
+    updateZoomProps();
+  }, [updateZoomProps]);
+
   const pinchGesture = Gesture.Pinch()
     .onUpdate((e) => {
       const newScale = Math.max(1, Math.min(5, savedScale.value * e.scale));
       scale.value = newScale;
+      runOnJS(syncZoomDuringGesture)();
     })
     .onEnd(() => {
       savedScale.value = scale.value;
@@ -147,6 +157,7 @@ const ColoringScreen = () => {
       if (scale.value > 1) {
         translateX.value = savedTranslateX.value + e.translationX;
         translateY.value = savedTranslateY.value + e.translationY;
+        runOnJS(syncZoomDuringGesture)();
       }
     })
     .onEnd(() => {

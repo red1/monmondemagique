@@ -1,5 +1,6 @@
 import React, { memo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import StoryCoverImage from '../shared/StoryCoverImage';
 import { formatStoryDurationLabel } from '../../services/storyService';
 
@@ -13,6 +14,8 @@ function StoryGridCard({
   displayThumbnail,
   fallbackThumbnail,
   onPress,
+  onLongPress,
+  onInfoPress,
   t,
 }) {
   const durationLabel = formatStoryDurationLabel(item);
@@ -26,8 +29,22 @@ function StoryGridCard({
         { width },
       ]}
       onPress={onPress}
+      onLongPress={onLongPress}
+      delayLongPress={400}
       activeOpacity={0.85}
     >
+      {onInfoPress ? (
+        <TouchableOpacity
+          style={styles.infoBtn}
+          onPress={(e) => {
+            e.stopPropagation?.();
+            onInfoPress();
+          }}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          <Ionicons name="create-outline" size={16} color="#9B59B6" />
+        </TouchableOpacity>
+      ) : null}
       <StoryCoverImage
         thumbnail={displayThumbnail}
         fallbackThumbnail={fallbackThumbnail}
@@ -51,6 +68,9 @@ function StoryGridCard({
       {item.genre ? (
         <Text style={styles.metaTag} numberOfLines={1}>{item.genre}</Text>
       ) : null}
+      {item.extraInfo ? (
+        <Text style={styles.extraInfoTag} numberOfLines={1}>{item.extraInfo}</Text>
+      ) : null}
       {item.packTitle ? (
         <Text style={styles.packSubtitle} numberOfLines={1}>{item.packTitle}</Text>
       ) : null}
@@ -62,11 +82,14 @@ export default memo(StoryGridCard, (prev, next) => (
   prev.item.storyId === next.item.storyId
   && prev.item.title === next.item.title
   && prev.item.thumbnail === next.item.thumbnail
+  && prev.item.extraInfo === next.item.extraInfo
   && prev.queueIdx === next.queueIdx
   && prev.isQueued === next.isQueued
   && prev.willPlay === next.willPlay
   && prev.displayThumbnail === next.displayThumbnail
   && prev.width === next.width
+  && prev.onLongPress === next.onLongPress
+  && prev.onInfoPress === next.onInfoPress
 ));
 
 const styles = StyleSheet.create({
@@ -83,6 +106,19 @@ const styles = StyleSheet.create({
   },
   storyCardQueued: { borderWidth: 2, borderColor: '#FFD700' },
   storyCardWillPlay: { borderColor: '#32CD32' },
+  infoBtn: {
+    position: 'absolute',
+    top: 8,
+    left: 8,
+    zIndex: 2,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    borderRadius: 12,
+    width: 26,
+    height: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 2,
+  },
   thumbnail: { width: '100%', height: 120, backgroundColor: '#f0f0f0' },
   queueBadge: {
     position: 'absolute',
@@ -126,6 +162,14 @@ const styles = StyleSheet.create({
     color: '#00CED1',
     paddingHorizontal: 10,
     paddingTop: 2,
+  },
+  extraInfoTag: {
+    fontFamily: 'Fredoka-SemiBold',
+    fontSize: 10,
+    color: '#FF69B4',
+    paddingHorizontal: 10,
+    paddingTop: 2,
+    fontStyle: 'italic',
   },
   packSubtitle: {
     fontFamily: 'Fredoka-SemiBold',

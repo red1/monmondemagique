@@ -25,17 +25,22 @@ Document des optimisations appliquées en **juillet 2026** pour garder l’app f
 | Sauvegardes partielles toutes les 2,5 s | I/O + refresh UI fréquents |
 | Notifications bibliothèque toutes les 300 ms pendant download | Re-render global |
 
-### Après (`zipExtract.js`, `megaFile.js`, `storyService.js`)
+### Après (`zipExtract.js`, `megaFile.js`, `storyService.js`, `nativeZip.js`)
 
 | Optimisation | Détail |
 |--------------|--------|
-| **Extraction streaming** | `streamUnzipFromFile` + `createStreamingUnzipSession` — lecture 8 Mo/bloc, inflate incrémental |
-| **MEGA unifié** | Même pipeline streaming pour decrypt + unzip |
-| **8 écritures parallèles** | `MAX_WRITE_CONCURRENCY = 8`, file `getSharedWriteQueue()` partagée entre packs |
-| **Yield UI** | `yieldToEventLoop()` + `requestAnimationFrame` entre blocs |
+| **Extraction native** | `react-native-zip-archive` (SSZipArchive / ZipInputStream) — **~5–15×** plus rapide que JS fflate sur builds dev/prod |
+| **MEGA decrypt → zip → native unzip** | Packs ≤ 90 Mo : decrypt complet puis `unzip()` natif (évite des centaines d’écritures JS) |
+| **Extraction streaming (fallback)** | `streamUnzipFromFile` + fflate — lecture 16 Mo/bloc, inflate incrémental |
+| **16 écritures parallèles** | `MAX_WRITE_CONCURRENCY = 16`, file `getSharedWriteQueue()` partagée |
+| **Cache dossiers** | `createDirCache()` — évite `makeDirectoryAsync` répétés |
+| **Mode rapide** | Yield tous les 32 Mo (vs 8 Mo) pendant extraction active |
+| **Yield UI** | `yieldToEventLoop()` entre blocs (fallback JS uniquement) |
 | **Sauvegardes partielles** | Max 1 / 10 s ou 12 fichiers, mode `fast: true` |
 | **Notify debounce** | 2 s pendant téléchargement actif (`beginActiveDownload` / `endActiveDownload`) |
 | **Progress UI** | Throttle 300 ms dans `StoryDownloadContext` |
+
+> **Note** : l’extraction native nécessite un build dev/prod (`npx expo run:android` ou EAS). Expo Go utilise le fallback JS.
 
 ---
 

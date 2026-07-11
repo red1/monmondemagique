@@ -24,13 +24,16 @@ const TIMER_SHORTCUTS = [1, 5, 10, 20];
 const MIN_TIMER_MINUTES = 1;
 const MAX_TIMER_MINUTES = 180;
 const STORY_OPTIONS = [1, 2, 3, 5, 10];
+const VIDEO_OPTIONS = [1, 2, 3, 5, 10];
 const MIN_STORY_COUNT = 1;
 const MAX_STORY_COUNT = 20;
+const MIN_VIDEO_COUNT = 1;
+const MAX_VIDEO_COUNT = 20;
+
+import { createParentalMathChallenge } from '../utils/parentalMathChallenge';
 
 function createResetChallenge() {
-  const a = 3 + Math.floor(Math.random() * 9);
-  const b = 3 + Math.floor(Math.random() * 9);
-  return { a, b, answer: a * b };
+  return createParentalMathChallenge();
 }
 
 const HomeScreen = () => {
@@ -40,7 +43,8 @@ const HomeScreen = () => {
   const { soundEnabled, setSoundEnabled, musicEnabled, setMusicEnabled, playSound } = useSounds();
   const { language, changeLanguage } = useLanguage();
   const {
-    isActive, session, remainingMs, activateSession, deactivateSession, getStoriesRemaining, resetPin,
+    isActive, session, remainingMs, activateSession, deactivateSession,
+    getStoriesRemaining, getVideosRemaining, resetPin,
   } = useParentalControl();
   const [showSettings, setShowSettings] = useState(false);
   const [showLangPicker, setShowLangPicker] = useState(false);
@@ -49,6 +53,7 @@ const HomeScreen = () => {
   const [parentalMode, setParentalMode] = useState('timer');
   const [timerMinutes, setTimerMinutes] = useState(10);
   const [storyCount, setStoryCount] = useState(3);
+  const [videoCount, setVideoCount] = useState(3);
   const [pinChangeNew, setPinChangeNew] = useState('');
   const [pinChangeConfirm, setPinChangeConfirm] = useState('');
   const [resetChallenge, setResetChallenge] = useState(createResetChallenge);
@@ -60,6 +65,7 @@ const HomeScreen = () => {
       setParentalMode(prefs.mode);
       setTimerMinutes(prefs.timerMinutes);
       setStoryCount(prefs.storyCount);
+      setVideoCount(prefs.videoCount);
     })();
   }, []);
 
@@ -70,6 +76,7 @@ const HomeScreen = () => {
         setParentalMode(prefs.mode);
         setTimerMinutes(prefs.timerMinutes);
         setStoryCount(prefs.storyCount);
+      setVideoCount(prefs.videoCount);
       })();
       setResetChallenge(createResetChallenge());
       setPinResetAnswer('');
@@ -84,8 +91,8 @@ const HomeScreen = () => {
   const columns = isTablet ? (isLandscape ? 4 : 3) : (isLandscape ? 4 : 2);
   const btnWidth = (width * 0.92 - (columns + 1) * 12) / columns;
   const btnHeight = isTablet
-    ? Math.min(btnWidth * 0.85, (height - insets.top - insets.bottom - 120) / Math.ceil(9 / columns))
-    : Math.min((height - insets.top - insets.bottom - 100) / (isLandscape ? 2 : 4), btnWidth * 1.1);
+    ? Math.min(btnWidth * 0.85, (height - insets.top - insets.bottom - 120) / Math.ceil(10 / columns))
+    : Math.min((height - insets.top - insets.bottom - 100) / (isLandscape ? 3 : 5), btnWidth * 1.1);
   const iconSize = isTablet ? 32 : 28;
   const titleSize = isTablet ? 20 : 16;
 
@@ -125,9 +132,10 @@ const HomeScreen = () => {
       await activateSession({
         mode: parentalMode,
         value: parentalMode === 'timer' ? timerMinutes : storyCount,
+        videoValue: parentalMode === 'stories' ? videoCount : undefined,
         parentPin: parentalPin,
       });
-      await saveParentalPrefs({ mode: parentalMode, timerMinutes, storyCount });
+      await saveParentalPrefs({ mode: parentalMode, timerMinutes, storyCount, videoCount });
       playSound('success');
       setParentalPin('');
       setShowSettings(false);
@@ -163,75 +171,107 @@ const HomeScreen = () => {
     setStoryCount((prev) => Math.min(MAX_STORY_COUNT, Math.max(MIN_STORY_COUNT, prev + delta)));
   };
 
+  const adjustVideoCount = (delta) => {
+    playSound('pop');
+    setVideoCount((prev) => Math.min(MAX_VIDEO_COUNT, Math.max(MIN_VIDEO_COUNT, prev + delta)));
+  };
+
   const renderValuePicker = () => (
-    <>
-      <Text style={styles.parentalLabel}>
-        {parentalMode === 'timer' ? t.parentalTimerLabel : t.parentalStoriesLabel}
-      </Text>
-      {parentalMode === 'timer' ? (
-        <>
-          <View style={styles.optionRow}>
-            {TIMER_SHORTCUTS.map((opt) => (
-              <TouchableOpacity
-                key={opt}
-                style={[styles.optionChip, timerMinutes === opt && styles.optionChipActive]}
-                onPress={() => { playSound('pop'); setTimerMinutes(opt); }}
-              >
-                <Text style={[styles.optionChipText, timerMinutes === opt && styles.optionChipTextActive]}>{opt}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <View style={styles.stepperRow}>
+    parentalMode === 'timer' ? (
+      <>
+        <Text style={styles.parentalLabel}>{t.parentalTimerLabel}</Text>
+        <View style={styles.optionRow}>
+          {TIMER_SHORTCUTS.map((opt) => (
             <TouchableOpacity
-              style={[styles.stepperBtn, timerMinutes <= MIN_TIMER_MINUTES && styles.stepperBtnDisabled]}
-              onPress={() => adjustTimerMinutes(-1)}
-              disabled={timerMinutes <= MIN_TIMER_MINUTES}
+              key={opt}
+              style={[styles.optionChip, timerMinutes === opt && styles.optionChipActive]}
+              onPress={() => { playSound('pop'); setTimerMinutes(opt); }}
             >
-              <Ionicons name="remove" size={28} color={timerMinutes <= MIN_TIMER_MINUTES ? '#ccc' : '#9B59B6'} />
+              <Text style={[styles.optionChipText, timerMinutes === opt && styles.optionChipTextActive]}>{opt}</Text>
             </TouchableOpacity>
-            <Text style={styles.stepperValue}>{timerMinutes} {t.parentalMinutesShort}</Text>
+          ))}
+        </View>
+        <View style={styles.stepperRow}>
+          <TouchableOpacity
+            style={[styles.stepperBtn, timerMinutes <= MIN_TIMER_MINUTES && styles.stepperBtnDisabled]}
+            onPress={() => adjustTimerMinutes(-1)}
+            disabled={timerMinutes <= MIN_TIMER_MINUTES}
+          >
+            <Ionicons name="remove" size={28} color={timerMinutes <= MIN_TIMER_MINUTES ? '#ccc' : '#9B59B6'} />
+          </TouchableOpacity>
+          <Text style={styles.stepperValue}>{timerMinutes} {t.parentalMinutesShort}</Text>
+          <TouchableOpacity
+            style={[styles.stepperBtn, timerMinutes >= MAX_TIMER_MINUTES && styles.stepperBtnDisabled]}
+            onPress={() => adjustTimerMinutes(1)}
+            disabled={timerMinutes >= MAX_TIMER_MINUTES}
+          >
+            <Ionicons name="add" size={28} color={timerMinutes >= MAX_TIMER_MINUTES ? '#ccc' : '#9B59B6'} />
+          </TouchableOpacity>
+        </View>
+      </>
+    ) : (
+      <>
+        <Text style={styles.parentalLabel}>{t.parentalStoriesLabel}</Text>
+        <View style={styles.optionRow}>
+          {STORY_OPTIONS.map((opt) => (
             <TouchableOpacity
-              style={[styles.stepperBtn, timerMinutes >= MAX_TIMER_MINUTES && styles.stepperBtnDisabled]}
-              onPress={() => adjustTimerMinutes(1)}
-              disabled={timerMinutes >= MAX_TIMER_MINUTES}
+              key={`story-${opt}`}
+              style={[styles.optionChip, storyCount === opt && styles.optionChipActive]}
+              onPress={() => { playSound('pop'); setStoryCount(opt); }}
             >
-              <Ionicons name="add" size={28} color={timerMinutes >= MAX_TIMER_MINUTES ? '#ccc' : '#9B59B6'} />
+              <Text style={[styles.optionChipText, storyCount === opt && styles.optionChipTextActive]}>{opt}</Text>
             </TouchableOpacity>
-          </View>
-        </>
-      ) : (
-        <>
-          <View style={styles.optionRow}>
-            {STORY_OPTIONS.map((opt) => (
-              <TouchableOpacity
-                key={opt}
-                style={[styles.optionChip, storyCount === opt && styles.optionChipActive]}
-                onPress={() => { playSound('pop'); setStoryCount(opt); }}
-              >
-                <Text style={[styles.optionChipText, storyCount === opt && styles.optionChipTextActive]}>{opt}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <View style={styles.stepperRow}>
+          ))}
+        </View>
+        <View style={styles.stepperRow}>
+          <TouchableOpacity
+            style={[styles.stepperBtn, storyCount <= MIN_STORY_COUNT && styles.stepperBtnDisabled]}
+            onPress={() => adjustStoryCount(-1)}
+            disabled={storyCount <= MIN_STORY_COUNT}
+          >
+            <Ionicons name="remove" size={28} color={storyCount <= MIN_STORY_COUNT ? '#ccc' : '#9B59B6'} />
+          </TouchableOpacity>
+          <Text style={styles.stepperValue}>{storyCount}</Text>
+          <TouchableOpacity
+            style={[styles.stepperBtn, storyCount >= MAX_STORY_COUNT && styles.stepperBtnDisabled]}
+            onPress={() => adjustStoryCount(1)}
+            disabled={storyCount >= MAX_STORY_COUNT}
+          >
+            <Ionicons name="add" size={28} color={storyCount >= MAX_STORY_COUNT ? '#ccc' : '#9B59B6'} />
+          </TouchableOpacity>
+        </View>
+
+        <Text style={[styles.parentalLabel, styles.parentalLabelSpaced]}>{t.parentalVideosLabel}</Text>
+        <View style={styles.optionRow}>
+          {VIDEO_OPTIONS.map((opt) => (
             <TouchableOpacity
-              style={[styles.stepperBtn, storyCount <= MIN_STORY_COUNT && styles.stepperBtnDisabled]}
-              onPress={() => adjustStoryCount(-1)}
-              disabled={storyCount <= MIN_STORY_COUNT}
+              key={`video-${opt}`}
+              style={[styles.optionChip, videoCount === opt && styles.optionChipActive]}
+              onPress={() => { playSound('pop'); setVideoCount(opt); }}
             >
-              <Ionicons name="remove" size={28} color={storyCount <= MIN_STORY_COUNT ? '#ccc' : '#9B59B6'} />
+              <Text style={[styles.optionChipText, videoCount === opt && styles.optionChipTextActive]}>{opt}</Text>
             </TouchableOpacity>
-            <Text style={styles.stepperValue}>{storyCount}</Text>
-            <TouchableOpacity
-              style={[styles.stepperBtn, storyCount >= MAX_STORY_COUNT && styles.stepperBtnDisabled]}
-              onPress={() => adjustStoryCount(1)}
-              disabled={storyCount >= MAX_STORY_COUNT}
-            >
-              <Ionicons name="add" size={28} color={storyCount >= MAX_STORY_COUNT ? '#ccc' : '#9B59B6'} />
-            </TouchableOpacity>
-          </View>
-        </>
-      )}
-    </>
+          ))}
+        </View>
+        <View style={styles.stepperRow}>
+          <TouchableOpacity
+            style={[styles.stepperBtn, videoCount <= MIN_VIDEO_COUNT && styles.stepperBtnDisabled]}
+            onPress={() => adjustVideoCount(-1)}
+            disabled={videoCount <= MIN_VIDEO_COUNT}
+          >
+            <Ionicons name="remove" size={28} color={videoCount <= MIN_VIDEO_COUNT ? '#ccc' : '#9B59B6'} />
+          </TouchableOpacity>
+          <Text style={styles.stepperValue}>{videoCount}</Text>
+          <TouchableOpacity
+            style={[styles.stepperBtn, videoCount >= MAX_VIDEO_COUNT && styles.stepperBtnDisabled]}
+            onPress={() => adjustVideoCount(1)}
+            disabled={videoCount >= MAX_VIDEO_COUNT}
+          >
+            <Ionicons name="add" size={28} color={videoCount >= MAX_VIDEO_COUNT ? '#ccc' : '#9B59B6'} />
+          </TouchableOpacity>
+        </View>
+      </>
+    )
   );
 
   const renderParentalSetup = () => (
@@ -242,7 +282,7 @@ const HomeScreen = () => {
           <Text style={styles.parentalStatusText}>
             {session?.mode === 'timer'
               ? t.parentalActiveTimer(formatRemaining(remainingMs))
-              : t.parentalActiveStories(getStoriesRemaining())}
+              : `${t.parentalActiveStories(getStoriesRemaining())} · ${t.parentalActiveVideos(getVideosRemaining())}`}
           </Text>
         </View>
       ) : (
@@ -379,6 +419,7 @@ const HomeScreen = () => {
     { id: 'hangman', title: t.hangmanGame, route: '/hangman', color: '#9370DB', darkColor: '#6A5ACD', icon: <FontAwesome5 name="font" size={iconSize - 6} color="white" /> },
     { id: 'reading', title: t.readingGame, route: '/reading', color: '#FFD700', darkColor: '#DAA520', icon: <Ionicons name="book" size={iconSize - 4} color="white" /> },
     { id: 'stories', title: t.storiesGame, route: '/stories', color: '#9B59B6', darkColor: '#7D3C98', icon: <Ionicons name="moon" size={iconSize} color="white" /> },
+    { id: 'videos', title: t.videosGame, route: '/videos', color: '#00CED1', darkColor: '#008B8B', icon: <Ionicons name="videocam" size={iconSize} color="white" /> },
     { id: 'jokes', title: t.jokesGame, route: '/jokes', color: '#FF4500', darkColor: '#CD5C5C', icon: <Ionicons name="happy" size={iconSize} color="white" /> },
     { id: 'puzzle', title: t.puzzleGame, route: '/puzzle', color: '#00CED1', darkColor: '#008B8B', icon: <MaterialIcons name="extension" size={iconSize} color="white" /> },
     { id: 'connect4', title: t.connect4Game, route: '/connect4', color: '#FF6347', darkColor: '#B22222', icon: <MaterialCommunityIcons name="grid" size={iconSize} color="white" /> },
@@ -557,6 +598,7 @@ const styles = StyleSheet.create({
   parentalSection: { marginTop: 16, paddingTop: 16, borderTopWidth: 1, borderTopColor: '#eee' },
   parentalTitle: { fontSize: 18, fontFamily: 'Fredoka-SemiBold', color: '#9B59B6', marginBottom: 12 },
   parentalLabel: { fontSize: 14, color: '#666', marginTop: 10, marginBottom: 6, fontFamily: 'Fredoka-SemiBold' },
+  parentalLabelSpaced: { marginTop: 16 },
   parentalStatus: { backgroundColor: '#f0fff0', padding: 12, borderRadius: 12, marginBottom: 8 },
   parentalStatusText: { fontSize: 15, color: '#228B22', fontFamily: 'Fredoka-SemiBold', textAlign: 'center' },
   modeRow: { flexDirection: 'row', gap: 8, marginBottom: 4 },

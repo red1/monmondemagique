@@ -19,6 +19,8 @@ import {
   fetchPackageSizes, formatBytes, getSourceById,
 } from '../services/storyService';
 
+const PACKAGES_PAGE_ROWS = 6;
+
 export default function StoryPackagesScreen() {
   const { playSound } = useSounds();
   const { language } = useLanguage();
@@ -38,6 +40,10 @@ export default function StoryPackagesScreen() {
   } = useStoryDownload();
   const retryTriggeredRef = useRef(false);
   const params = useLocalSearchParams();
+  const [visibleCount, setVisibleCount] = useState(PACKAGES_PAGE_ROWS * numColumns);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  const pageSize = PACKAGES_PAGE_ROWS * numColumns;
 
   const sources = getSources();
 
@@ -68,6 +74,26 @@ export default function StoryPackagesScreen() {
     name: nameFilter,
     source: sourceFilter,
   }), [nameFilter, sourceFilter]);
+
+  useEffect(() => {
+    setVisibleCount(pageSize);
+  }, [nameFilter, sourceFilter, pageSize]);
+
+  const paginatedPackages = useMemo(
+    () => filteredPackages.slice(0, visibleCount),
+    [filteredPackages, visibleCount],
+  );
+
+  const hasMorePackages = visibleCount < filteredPackages.length;
+
+  const loadMorePackages = useCallback(() => {
+    if (!hasMorePackages || loadingMore) return;
+    setLoadingMore(true);
+    requestAnimationFrame(() => {
+      setVisibleCount((prev) => Math.min(prev + pageSize, filteredPackages.length));
+      setLoadingMore(false);
+    });
+  }, [hasMorePackages, loadingMore, pageSize, filteredPackages.length]);
 
   useEffect(() => {
     let cancelled = false;
@@ -282,27 +308,53 @@ export default function StoryPackagesScreen() {
       <Header title={`📦 ${t.storiesCatalog}`} backFallback="/stories" />
 
       <FlatList
-        data={filteredPackages}
+        data={paginatedPackages}
         keyExtractor={(item) => item.id}
         numColumns={numColumns}
         key={numColumns}
+        style={styles.list}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
         ListHeaderComponent={listHeader}
-        contentContainerStyle={[styles.listContent, { paddingBottom: Math.max(insets.bottom, 16) }]}
+        contentContainerStyle={[styles.listContent, { paddingBottom: hasMorePackages ? 8 : Math.max(insets.bottom, 16) }]}
         columnWrapperStyle={numColumns > 1 ? styles.columnWrapper : undefined}
         renderItem={renderPackage}
         initialNumToRender={12}
         maxToRenderPerBatch={8}
         windowSize={7}
-        removeClippedSubviews
+        removeClippedSubviews={false}
+        ListFooterComponent={
+          filteredPackages.length > pageSize ? (
+            <Text style={styles.listCountText}>
+              {t.storiesShowingCount(paginatedPackages.length, filteredPackages.length)}
+            </Text>
+          ) : null
+        }
       />
+
+      {hasMorePackages ? (
+        <TouchableOpacity
+          style={[styles.loadMoreBar, { marginBottom: Math.max(insets.bottom, 12) }]}
+          onPress={loadMorePackages}
+          disabled={loadingMore}
+        >
+          {loadingMore ? (
+            <ActivityIndicator size="small" color="#9B59B6" />
+          ) : (
+            <>
+              <Ionicons name="chevron-down-circle" size={22} color="#9B59B6" />
+              <Text style={styles.loadMoreText}>{t.storiesLoadMore}</Text>
+            </>
+          )}
+        </TouchableOpacity>
+      ) : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFF5E1' },
+  list: { flex: 1 },
   filters: { paddingTop: 8, paddingBottom: 12, gap: 8 },
   hint: { fontSize: 13, color: '#666', fontFamily: 'Fredoka-SemiBold', textAlign: 'center' },
   downloadsHint: {
@@ -376,4 +428,15 @@ const styles = StyleSheet.create({
   deleteBtn: {
     backgroundColor: '#FF6347', borderRadius: 20, padding: 10,
   },
+  listCountText: {
+    textAlign: 'center', fontSize: 12, fontFamily: 'Fredoka-SemiBold', color: '#888',
+    paddingVertical: 12,
+  },
+  loadMoreBar: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    marginHorizontal: 16, marginTop: 4, paddingVertical: 12, paddingHorizontal: 16,
+    borderRadius: 20, backgroundColor: 'white', borderWidth: 2, borderColor: '#9B59B6',
+    elevation: 4, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1,
+  },
+  loadMoreText: { fontSize: 14, fontFamily: 'Fredoka-SemiBold', color: '#9B59B6' },
 });

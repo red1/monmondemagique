@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Modal, BackHandler, FlatList,
-  TextInput, Alert, useWindowDimensions, AppState,
+  Alert, useWindowDimensions, AppState,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Audio } from 'expo-av';
@@ -11,6 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import WarningBanner from '../components/shared/WarningBanner';
+import ParentalLockScreen from '../components/shared/ParentalLockScreen';
 import AnimatedBackground from '../components/shared/AnimatedBackground';
 import StoryCoverImage from '../components/shared/StoryCoverImage';
 import { useSounds } from '../../contexts/SoundContext';
@@ -25,40 +26,14 @@ import {
 } from '../services/storyService';
 import { safeGoBack } from '../utils/safeNavigation';
 import { stopActiveStorySound, registerStorySound, clearStorySound } from '../utils/storyAudio';
+import PlayerControlBtn, { playerControlStyles } from '../components/shared/PlayerControlBtn';
+import VolumeControls from '../components/shared/VolumeControls';
 
 const WARNING_SECONDS = 30;
 const SKIP_MS = 10_000;
 const PROGRESS_SAVE_INTERVAL_MS = 5_000;
 const PINK = '#FF69B4';
-
-function PlayerControlBtn({
-  icon, label, onPress, disabled, primary, flip,
-}) {
-  return (
-    <TouchableOpacity
-      style={[
-        styles.ctrlBtn,
-        primary && styles.ctrlBtnPrimary,
-        disabled && styles.ctrlBtnDisabled,
-      ]}
-      onPress={onPress}
-      disabled={disabled}
-      activeOpacity={0.75}
-    >
-      <Ionicons
-        name={icon}
-        size={primary ? 34 : 22}
-        color={disabled ? 'rgba(255,105,180,0.4)' : primary ? 'white' : PINK}
-        style={flip ? { transform: [{ scaleX: -1 }] } : undefined}
-      />
-      {label ? (
-        <Text style={[styles.ctrlLabel, disabled && styles.ctrlLabelDisabled]} numberOfLines={1}>
-          {label}
-        </Text>
-      ) : null}
-    </TouchableOpacity>
-  );
-}
+const DEFAULT_VOLUME = 0.85;
 
 function isHashFilename(name) {
   return /^[a-f0-9]{20,}\.mp3$/i.test(name || '');
@@ -68,10 +43,14 @@ export default function StoryPlayerScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
   const { beginStoryPlayback, endStoryPlayback } = useSounds();
+  const beginStoryPlaybackRef = useRef(beginStoryPlayback);
+  const endStoryPlaybackRef = useRef(endStoryPlayback);
+  beginStoryPlaybackRef.current = beginStoryPlayback;
+  endStoryPlaybackRef.current = endStoryPlayback;
   const { language } = useLanguage();
   const {
     shouldWarnForStoryEnd, recordStoryCompleted, triggerWarning, getStoriesRemaining,
-    isActive, session, isLocked, unlockScreen, lockScreen, resetStoriesPlayed,
+    isActive, session, isLocked, lockScreen, resetStoriesPlayed,
   } = useParentalControl();
   const t = getStrings(language);
   const insets = useSafeAreaInsets();
@@ -94,10 +73,9 @@ export default function StoryPlayerScreen() {
   const [durationMs, setDurationMs] = useState(0);
   const [showWarning, setShowWarning] = useState(false);
   const [showBedtime, setShowBedtime] = useState(false);
-  const [pin, setPin] = useState('');
-  const [pinError, setPinError] = useState(false);
   const [warningShown, setWarningShown] = useState(false);
   const [ready, setReady] = useState(false);
+  const [volume, setVolume] = useState(DEFAULT_VOLUME);
 
   const lastPlaybackUiRef = useRef(0);
   const positionMsRef = useRef(0);
@@ -201,7 +179,9 @@ export default function StoryPlayerScreen() {
     if (shouldResume && resumeProgress) {
       const startIdx = params.startStoryIndex != null
         ? Math.min(parseInt(String(params.startStoryIndex), 10) || 0, Math.max(pl.length - 1, 0))
-        : Math.min(resumeProgress.currentStoryIndex || 0, Math.max(pl.length - 1, 0));
+        : (pl.length === 1
+          ? 0
+          : Math.min(resumeProgress.currentStoryIndex || 0, Math.max(pl.length - 1, 0)));
       const { trackIndex: tIdx, positionMs: posMs } = getStoryResumePosition(
         resumeProgress, playlistIds, startIdx,
       );
@@ -237,6 +217,15 @@ export default function StoryPlayerScreen() {
     } catch (_) { /* ignore */ }
   }, []);
 
+  const stopPlayback = useCallback(async () => {
+    playbackSessionRef.current += 1;
+    await unloadSound();
+    await stopActiveStorySound();
+  }, [unloadSound]);
+
+  const stopPlaybackRef = useRef(stopPlayback);
+  stopPlaybackRef.current = stopPlayback;
+
   const saveCurrentProgress = useCallback(async ({ force = false } = {}) => {
     if (progressFinalizedRef.current || !playlistRef.current.length) return;
     if (!force && exitProgressSavedRef.current) return;
@@ -254,12 +243,13 @@ export default function StoryPlayerScreen() {
   }, [persistProgress]);
 
   useEffect(() => {
-    beginStoryPlayback();
+    beginStoryPlaybackRef.current();
+    stopActiveStorySound();
     return () => {
-      unloadSound();
-      endStoryPlayback();
+      stopPlaybackRef.current();
+      endStoryPlaybackRef.current();
     };
-  }, [beginStoryPlayback, endStoryPlayback, unloadSound]);
+  }, []);
 
   const finishPlaylist = useCallback(async () => {
     progressFinalizedRef.current = true;
@@ -343,16 +333,24 @@ export default function StoryPlayerScreen() {
     await stopActiveStorySound();
     await unloadSound();
 
+    if (sessionId !== playbackSessionRef.current) return;
+
     const startMs = resumeStartMsRef.current || 0;
     resumeStartMsRef.current = 0;
 
-    const { sound } = await Audio.Sound.createAsync(
-      { uri: track.uri },
-      { shouldPlay: true, positionMillis: startMs },
-    );
+    let sound;
+    try {
+      const created = await Audio.Sound.createAsync(
+        { uri: track.uri },
+        { shouldPlay: true, positionMillis: startMs },
+      );
+      sound = created.sound;
+    } catch (_) {
+      return;
+    }
 
     if (sessionId !== playbackSessionRef.current) {
-      await sound.unloadAsync();
+      try { await sound.unloadAsync(); } catch (_) { /* ignore */ }
       return;
     }
 
@@ -367,6 +365,9 @@ export default function StoryPlayerScreen() {
 
     soundRef.current = sound;
     registerStorySound(sound);
+    try {
+      await sound.setVolumeAsync(volume);
+    } catch (_) { /* ignore */ }
     setIsPlaying(true);
     const playingStory = playlistRef.current[storyIndexRef.current];
     if (playingStory?.packId) recordPackUsage(playingStory.packId);
@@ -421,7 +422,16 @@ export default function StoryPlayerScreen() {
         handleTrackEnd();
       }
     });
-  }, [unloadSound, computeTotalRemaining, computeCurrentStoryRemaining, handleTrackEnd, shouldWarnForStoryEnd, triggerWarning, persistProgress]);
+  }, [unloadSound, volume, computeTotalRemaining, computeCurrentStoryRemaining, handleTrackEnd, shouldWarnForStoryEnd, triggerWarning, persistProgress]);
+
+  const applyVolume = useCallback(async (nextVolume) => {
+    setVolume(nextVolume);
+    if (soundRef.current) {
+      try {
+        await soundRef.current.setVolumeAsync(nextVolume);
+      } catch (_) { /* ignore */ }
+    }
+  }, []);
 
   playCurrentTrackRef.current = playCurrentTrack;
 
@@ -437,6 +447,7 @@ export default function StoryPlayerScreen() {
     return () => {
       playbackSessionRef.current += 1;
       unloadSound();
+      stopActiveStorySound();
       deactivateKeepAwake('story-player');
     };
   }, [ready, storyIndex, trackIndex, currentTrack?.uri, unloadSound]);
@@ -520,14 +531,13 @@ export default function StoryPlayerScreen() {
     const tracks = playlistRef.current[index]?.tracks || [];
     const safeTIdx = Math.min(tIdx, Math.max(tracks.length - 1, 0));
 
-    playbackSessionRef.current += 1;
-    await unloadSound();
+    await stopPlayback();
     resumeStartMsRef.current = posMs;
     setStoryIndex(index);
     setTrackIndex(safeTIdx);
     setPositionMs(posMs);
     await persistProgress(index, safeTIdx, posMs);
-  }, [unloadSound, persistProgress, playlistIds]);
+  }, [stopPlayback, persistProgress, playlistIds]);
 
   const skipPreviousStory = useCallback(() => {
     goToStory(storyIndex - 1);
@@ -567,11 +577,10 @@ export default function StoryPlayerScreen() {
 
   const handleBack = useCallback(async () => {
     await saveCurrentProgress({ force: true });
-    playbackSessionRef.current += 1;
-    await unloadSound();
+    await stopPlayback();
     deactivateKeepAwake('story-player');
     safeGoBack(router, '/stories');
-  }, [router, saveCurrentProgress, unloadSound]);
+  }, [router, saveCurrentProgress, stopPlayback]);
 
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -586,23 +595,10 @@ export default function StoryPlayerScreen() {
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   };
 
-  const handleBedtimeUnlock = async () => {
-    if (!isActive) {
-      setShowBedtime(false);
-      safeGoBack(router, '/stories');
-      return;
-    }
-    try {
-      await unlockScreen(pin);
-      setPin('');
-      setPinError(false);
-      setShowBedtime(false);
-      safeGoBack(router, '/stories');
-    } catch (_) {
-      setPinError(true);
-      Alert.alert(t.error, t.parentalWrongPin);
-    }
-  };
+  const handleBedtimeUnlocked = useCallback(() => {
+    setShowBedtime(false);
+    safeGoBack(router, '/stories');
+  }, [router]);
 
   const bedtimeVisible = showBedtime || isLocked;
   const bedtimeMessage = isLocked && session?.mode === 'timer'
@@ -661,34 +657,48 @@ export default function StoryPlayerScreen() {
           {formatTime(positionMs)} / {formatTime(durationMs)}
         </Text>
 
-        <View style={styles.controlsRow}>
+        <View style={playerControlStyles.controlsRow}>
           <PlayerControlBtn
             icon="play-skip-back"
             label={t.storiesPrevious}
             onPress={skipPreviousStory}
             disabled={!canGoPrevious}
+            color={PINK}
           />
           <PlayerControlBtn
             icon="reload"
             label={t.storiesSkipBack}
             onPress={() => seekBy(-SKIP_MS)}
             flip
+            color={PINK}
           />
           <PlayerControlBtn
             icon={isPlaying ? 'pause' : 'play'}
             onPress={togglePlay}
             primary
+            color={PINK}
           />
           <PlayerControlBtn
             icon="reload"
             label={t.storiesSkipForward}
             onPress={() => seekBy(SKIP_MS)}
+            color={PINK}
           />
           <PlayerControlBtn
             icon="play-skip-forward"
             label={t.storiesNext}
             onPress={skipNextStory}
             disabled={!canGoNext}
+            color={PINK}
+          />
+        </View>
+
+        <View style={styles.inlineFooter}>
+          <View style={{ flex: 1 }} />
+          <VolumeControls
+            volume={volume}
+            onVolumeChange={applyVolume}
+            accentColor={PINK}
           />
         </View>
       </View>
@@ -765,32 +775,12 @@ export default function StoryPlayerScreen() {
       />
 
       <Modal visible={bedtimeVisible} animationType="fade">
-        <View style={styles.bedtimeScreen}>
-          <Text style={styles.bedtimeEmoji}>🌙✨</Text>
-          <Text style={styles.bedtimeTitle}>{t.storiesGoodNight}</Text>
-          <Text style={styles.bedtimeText}>{bedtimeMessage}</Text>
-          <Text style={styles.bedtimeHint}>{t.storiesBedtimeHint}</Text>
-
-          {isActive && (
-            <View style={styles.pinSection}>
-              <Text style={styles.pinLabel}>{t.parentalUnlockLabel}</Text>
-              <TextInput
-                style={[styles.pinInput, pinError && styles.pinInputError]}
-                value={pin}
-                onChangeText={(v) => { setPin(v.replace(/\D/g, '').slice(0, 4)); setPinError(false); }}
-                keyboardType="number-pad"
-                secureTextEntry
-                maxLength={4}
-                placeholder="••••"
-                placeholderTextColor="rgba(255,255,255,0.3)"
-              />
-              <TouchableOpacity style={styles.unlockBtn} onPress={handleBedtimeUnlock}>
-                <Ionicons name="lock-open" size={22} color="white" />
-                <Text style={styles.unlockBtnText}>{t.parentalUnlock}</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-        </View>
+        <ParentalLockScreen
+          title={t.storiesGoodNight}
+          message={bedtimeMessage}
+          hint={t.storiesBedtimeHint}
+          onUnlocked={handleBedtimeUnlocked}
+        />
       </Modal>
     </View>
   );
@@ -825,30 +815,6 @@ const styles = StyleSheet.create({
     marginTop: 14,
   },
   timeText: { fontSize: 13, color: '#6a5060', marginTop: 6, fontFamily: 'Fredoka-SemiBold' },
-  controlsRow: {
-    flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'center',
-    gap: 8, marginTop: 18, width: '100%', maxWidth: 440,
-  },
-  ctrlBtn: {
-    flex: 1, maxWidth: 72, minHeight: 58,
-    borderRadius: 14, borderWidth: 2, borderColor: PINK,
-    backgroundColor: 'rgba(255,255,255,0.92)',
-    alignItems: 'center', justifyContent: 'center', paddingVertical: 6, paddingHorizontal: 2,
-  },
-  ctrlBtnPrimary: {
-    flex: 0, width: 64, height: 64, minHeight: 64,
-    borderRadius: 32, backgroundColor: PINK, borderColor: PINK,
-    marginBottom: 0,
-  },
-  ctrlBtnDisabled: {
-    backgroundColor: 'rgba(255,255,255,0.45)',
-    borderColor: 'rgba(255,105,180,0.35)',
-  },
-  ctrlLabel: {
-    fontSize: 9, color: PINK, fontFamily: 'Fredoka-SemiBold',
-    marginTop: 2, textAlign: 'center',
-  },
-  ctrlLabelDisabled: { color: 'rgba(255,105,180,0.4)' },
   playlistPanel: {
     flex: 1,
     backgroundColor: 'rgba(255,255,255,0.95)',
@@ -885,24 +851,19 @@ const styles = StyleSheet.create({
   playlistItemTitleActive: { color: '#FF69B4' },
   playlistItemStatus: { fontFamily: 'Fredoka-SemiBold', fontSize: 11, color: '#888', marginTop: 2 },
   bedtimeScreen: {
-    flex: 1, backgroundColor: '#0d0d1a', alignItems: 'center',
-    justifyContent: 'center', padding: 32,
+    flex: 1, backgroundColor: '#0d0d1a',
+  },
+  bedtimeScroll: {
+    flexGrow: 1, alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: 32, paddingTop: 32, paddingBottom: 16,
   },
   bedtimeEmoji: { fontSize: 64, marginBottom: 24 },
   bedtimeTitle: { fontSize: 32, fontFamily: 'Fredoka-SemiBold', color: '#FFD700', marginBottom: 16 },
   bedtimeText: { fontSize: 18, color: 'rgba(255,255,255,0.8)', textAlign: 'center', lineHeight: 28 },
   bedtimeHint: { fontSize: 14, color: 'rgba(255,255,255,0.4)', marginTop: 16, textAlign: 'center' },
-  pinSection: { marginTop: 40, width: '100%', maxWidth: 280, alignItems: 'center', gap: 12 },
-  pinLabel: { fontSize: 14, color: 'rgba(255,255,255,0.6)', fontFamily: 'Fredoka-SemiBold' },
-  pinInput: {
-    width: '100%', backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 16,
-    paddingVertical: 14, paddingHorizontal: 20, fontSize: 24, color: 'white',
-    textAlign: 'center', letterSpacing: 8, borderWidth: 2, borderColor: 'rgba(255,255,255,0.2)',
+  bedtimeUnlockFooter: {
+    paddingHorizontal: 32, paddingTop: 16, paddingBottom: 32,
+    borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)',
+    alignItems: 'center', backgroundColor: '#0d0d1a',
   },
-  pinInputError: { borderColor: '#FF6347' },
-  unlockBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    backgroundColor: '#00CED1', paddingVertical: 14, paddingHorizontal: 28, borderRadius: 25,
-  },
-  unlockBtnText: { color: 'white', fontSize: 16, fontFamily: 'Fredoka-SemiBold' },
 });

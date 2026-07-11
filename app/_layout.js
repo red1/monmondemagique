@@ -1,8 +1,8 @@
 import { Stack } from 'expo-router';
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useFonts } from 'expo-font';
 import * as SplashScreen from 'expo-splash-screen';
-import { View } from 'react-native';
+import { Platform, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { SoundProvider } from '../contexts/SoundContext';
 import { LanguageProvider } from '../contexts/LanguageContext';
@@ -17,14 +17,25 @@ export default function Layout() {
   const [fontsLoaded] = useFonts({
     'Fredoka-SemiBold': require('../assets/fonts/Fredoka-SemiBold.ttf'),
   });
+  const [skiaReady, setSkiaReady] = useState(Platform.OS !== 'web');
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    let cancelled = false;
+    import('@shopify/react-native-skia/lib/module/web/LoadSkiaWeb')
+      .then(({ LoadSkiaWeb }) => LoadSkiaWeb())
+      .then(() => { if (!cancelled) setSkiaReady(true); })
+      .catch((e) => console.warn('[SkiaWeb] init failed:', e.message));
+    return () => { cancelled = true; };
+  }, []);
 
   const onLayoutRootView = useCallback(async () => {
-    if (fontsLoaded) {
+    if (fontsLoaded && skiaReady) {
       await SplashScreen.hideAsync();
     }
-  }, [fontsLoaded]);
+  }, [fontsLoaded, skiaReady]);
 
-  if (!fontsLoaded) {
+  if (!fontsLoaded || !skiaReady) {
     return null;
   }
 
@@ -67,6 +78,8 @@ export default function Layout() {
             <Stack.Screen name="stories" options={{ headerShown: false }} />
             <Stack.Screen name="story_packages" options={{ headerShown: false }} />
             <Stack.Screen name="story_player" options={{ headerShown: false }} />
+            <Stack.Screen name="videos" options={{ headerShown: false }} />
+            <Stack.Screen name="video_player" options={{ headerShown: false }} />
           </Stack>
           <StoryDownloadBanner />
           <ParentalLockOverlay />

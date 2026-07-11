@@ -4,9 +4,27 @@ import { File, decrypt } from 'megajs/dist/main.browser-es.mjs';
 import {
   createStreamingUnzipSession,
   getSharedWriteQueue,
+  mergeParts,
   READ_CHUNK_SIZE,
+  setExtractionFastMode,
+  streamUnzipFromFile,
   yieldToEventLoop,
 } from './zipExtract';
+import { isNativeZipAvailable, nativeUnzipToDirectory } from './nativeZip';
+import {
+  appendBinaryBase64,
+  initBinaryFile,
+  isNativeFileAvailable,
+} from './nativeFile';
+import {
+  isNativeStoryPackAvailable,
+  nativeDecryptAndUnzip,
+  nativeDownloadDecryptAndUnzip,
+} from './nativeStoryPack';
+
+/** Flush decrypted zip bytes to disk every N bytes during native decrypt phase. */
+const DECRYPT_FLUSH_BYTES = 4 * 1024 * 1024;
+const SLOW_PATH_YIELD_BYTES = 16 * 1024 * 1024;
 
 function packLog(step, detail) {
   if (!__DEV__) return;
@@ -73,23 +91,94 @@ function endStream(stream) {
   });
 }
 
-async function decryptEncryptedFileAndUnzip({
-  encryptedPath, destDir, key, totalSize, report, control, onFileExtracted,
+async function decryptToZipFileStreaming({
+  encryptedPath, zipPath, key, totalSize, report, control,
 }) {
-  packLog('Decrypt + unzip start', {
-    encryptedPath,
-    totalSize: formatBytes(totalSize),
-    hasKey: !!key,
-    readChunk: formatBytes(READ_CHUNK_SIZE),
+  packLog('Decrypt to zip (streaming)', { totalSize: formatBytes(totalSize), zipPath });
+  await initBinaryFile(zipPath);
+
+  const parts = [];
+  const decryptStream = decrypt(key);
+  decryptStream.on('data', (chunk) => {
+    parts.push(new Uint8Array(chunk));
   });
 
+  const flushToZip = async (force = false) => {
+    const pending = parts.reduce((sum, part) => sum + part.length, 0);
+    if (!force && pending < DECRYPT_FLUSH_BYTES) return;
+    if (!pending) return;
+    const merged = mergeParts(parts);
+    parts.length = 0;
+    await appendBinaryBase64(zipPath, Buffer.from(merged).toString('base64'));
+  };
+
+  let position = 0;
+  let lastYieldAt = 0;
+
+  while (position < totalSize) {
+    control?.checkAborted?.();
+    const length = Math.min(READ_CHUNK_SIZE, totalSize - position);
+    const b64 = await FileSystem.readAsStringAsync(encryptedPath, {
+      encoding: FileSystem.EncodingType.Base64,
+      position,
+      length,
+    });
+    await writeToStream(decryptStream, Buffer.from(b64, 'base64'));
+    position += length;
+    await flushToZip();
+
+    report?.(
+      0.58 + (position / totalSize) * 0.28,
+      'decrypting',
+      { bytesWritten: position, totalBytes: totalSize },
+    );
+
+    if (position - lastYieldAt >= READ_CHUNK_SIZE || position >= totalSize) {
+      lastYieldAt = position;
+      await yieldToEventLoop();
+    }
+  }
+
+  await endStream(decryptStream);
+  await flushToZip(true);
+  packLog('Decrypt to zip done', { zipPath });
+}
+
+async function nativeUnzipOrStream(zipPath, destDir, { report, control, onFileExtracted, progressStart = 0.86, progressSpan = 0.12 } = {}) {
+  if (isNativeZipAvailable()) {
+    report?.(progressStart, 'unzipping');
+    const result = await nativeUnzipToDirectory(zipPath, destDir, {
+      onProgress: (progress) => {
+        report?.(progressStart + progress * progressSpan, 'extracting');
+      },
+    });
+    if (result.native) {
+      packLog('Native unzip done', { zipPath });
+      return true;
+    }
+  }
+
+  await streamUnzipFromFile(zipPath, destDir, {
+    control,
+    onFileExtracted,
+    report: (progress, status, extra) => report?.(progress, status, extra),
+    formatBytes,
+    log: packLog,
+    progressStart,
+    progressSpan,
+    fastMode: true,
+  });
+  return false;
+}
+
+async function streamingDecryptAndUnzipJs({
+  encryptedPath, destDir, key, totalSize, report, control, onFileExtracted,
+}) {
   const phase = { progress: 0.58 };
   const phaseReport = (progress, status, extra) => {
     if (typeof progress === 'number') phase.progress = progress;
     report?.(phase.progress, status, { totalBytes: totalSize, ...extra });
   };
-
-  phaseReport(0.58, 'decrypting');
 
   const session = createStreamingUnzipSession(destDir, {
     enqueueWrite: getSharedWriteQueue(),
@@ -97,12 +186,13 @@ async function decryptEncryptedFileAndUnzip({
     onFileExtracted,
     formatBytes,
     log: packLog,
+    fastMode: false,
     onProgress: (status) => phaseReport(phase.progress, status),
   });
 
   const { unzip } = session;
-  let lastLoggedPct = -1;
   let lastYieldAt = 0;
+  const readChunkSize = READ_CHUNK_SIZE;
 
   if (key) {
     const decryptStream = decrypt(key);
@@ -113,7 +203,7 @@ async function decryptEncryptedFileAndUnzip({
     let position = 0;
     while (position < totalSize) {
       control?.checkAborted?.();
-      const length = Math.min(READ_CHUNK_SIZE, totalSize - position);
+      const length = Math.min(readChunkSize, totalSize - position);
       const b64 = await FileSystem.readAsStringAsync(encryptedPath, {
         encoding: FileSystem.EncodingType.Base64,
         position,
@@ -122,18 +212,13 @@ async function decryptEncryptedFileAndUnzip({
       await writeToStream(decryptStream, Buffer.from(b64, 'base64'));
       position += length;
 
-      const pct = Math.floor((position / totalSize) * 100);
-      if (pct >= lastLoggedPct + 15 || position >= totalSize) {
-        lastLoggedPct = pct;
-        packLog('Decrypt progress', { pct: `${pct}%`, position: formatBytes(position) });
-      }
       phaseReport(
         0.58 + (position / totalSize) * 0.38,
         position < totalSize * 0.12 ? 'decrypting' : 'unzipping',
         { bytesWritten: position },
       );
 
-      if (position - lastYieldAt >= READ_CHUNK_SIZE) {
+      if (position - lastYieldAt >= SLOW_PATH_YIELD_BYTES || position >= totalSize) {
         lastYieldAt = position;
         await yieldToEventLoop();
       }
@@ -145,7 +230,7 @@ async function decryptEncryptedFileAndUnzip({
     let position = 0;
     while (position < totalSize) {
       control?.checkAborted?.();
-      const length = Math.min(READ_CHUNK_SIZE, totalSize - position);
+      const length = Math.min(readChunkSize, totalSize - position);
       const b64 = await FileSystem.readAsStringAsync(encryptedPath, {
         encoding: FileSystem.EncodingType.Base64,
         position,
@@ -156,7 +241,7 @@ async function decryptEncryptedFileAndUnzip({
       position += length;
       phaseReport(0.58 + (position / totalSize) * 0.38, 'unzipping', { bytesWritten: position });
 
-      if (position - lastYieldAt >= READ_CHUNK_SIZE) {
+      if (position - lastYieldAt >= SLOW_PATH_YIELD_BYTES || position >= totalSize) {
         lastYieldAt = position;
         await yieldToEventLoop();
       }
@@ -164,12 +249,120 @@ async function decryptEncryptedFileAndUnzip({
   }
 
   const result = await session.finish();
-  packLog('Decrypt + unzip done', result);
+  packLog('JS stream decrypt + unzip done', result);
+}
+
+async function decryptEncryptedFileAndUnzip({
+  encryptedPath, destDir, key, totalSize, report, control, onFileExtracted,
+}) {
+  const zipPath = `${destDir}pack.zip`;
+  const useNativePipeline = key && isNativeZipAvailable() && isNativeFileAvailable();
+
+  packLog('Decrypt + unzip start', {
+    encryptedPath,
+    totalSize: formatBytes(totalSize),
+    hasKey: !!key,
+    nativeZip: isNativeZipAvailable(),
+    nativeFile: isNativeFileAvailable(),
+    pipeline: useNativePipeline ? 'decrypt-to-zip + native-unzip' : 'js-stream',
+    readChunk: formatBytes(READ_CHUNK_SIZE),
+  });
+
+  const phase = { progress: 0.58 };
+  const phaseReport = (progress, status, extra) => {
+    if (typeof progress === 'number') phase.progress = progress;
+    report?.(phase.progress, status, { totalBytes: totalSize, ...extra });
+  };
+
+  phaseReport(0.58, 'decrypting');
+
+  if (useNativePipeline) {
+    try {
+      await decryptToZipFileStreaming({
+        encryptedPath,
+        zipPath,
+        key,
+        totalSize,
+        report: phaseReport,
+        control,
+      });
+      control?.checkAborted?.();
+      await nativeUnzipOrStream(zipPath, destDir, {
+        report: phaseReport,
+        control,
+        onFileExtracted,
+        progressStart: 0.86,
+        progressSpan: 0.13,
+      });
+      await FileSystem.deleteAsync(zipPath, { idempotent: true });
+      packLog('Decrypt + native unzip done');
+      return;
+    } catch (e) {
+      packLog('Native pipeline failed, falling back to JS stream', e.message);
+      await FileSystem.deleteAsync(zipPath, { idempotent: true });
+    }
+  }
+
+  setExtractionFastMode(false);
+  try {
+    await streamingDecryptAndUnzipJs({
+      encryptedPath,
+      destDir,
+      key,
+      totalSize,
+      report,
+      control,
+      onFileExtracted,
+    });
+  } finally {
+    setExtractionFastMode(true);
+  }
+}
+
+async function runFullNativeMegaPipeline({
+  downloadUrl, encryptedPath, destDir, key, totalBytes, packId, report, control, skipDownload,
+}) {
+  packLog('Full native pipeline', {
+    packId,
+    skipDownload,
+    totalSize: formatBytes(totalBytes),
+  });
+
+  const nativeReport = (progress, status, extra) => {
+    if (control?.aborted) return;
+    report?.(progress, control?.phase === 'paused' ? 'paused' : status, extra);
+  };
+
+  if (skipDownload) {
+    control?.setPhase?.('decrypting');
+    nativeReport(0.55, 'decrypting', { totalBytes, bytesWritten: totalBytes });
+    await nativeDecryptAndUnzip({
+      encryptedPath,
+      destDir,
+      key,
+      packId,
+      onProgress: nativeReport,
+    });
+  } else {
+    control?.setPhase?.('downloading');
+    await nativeDownloadDecryptAndUnzip({
+      downloadUrl,
+      encryptedPath,
+      destDir,
+      key,
+      totalBytes,
+      packId,
+      onProgress: nativeReport,
+    });
+  }
+
+  control?.checkAborted?.();
+  await FileSystem.deleteAsync(`${destDir}.pack.enc.meta`, { idempotent: true });
 }
 
 /**
  * Download a MEGA pack without loading the full file into JS memory.
- * Encrypted bytes are saved natively, then decrypted/unzipped in large chunks.
+ * On Android dev builds: 100% native download + decrypt + unzip.
  */
 export async function megaDownloadAndExtract(url, destDir, { report, packId, control, onFileExtracted } = {}) {
   const startedAt = Date.now();
@@ -219,8 +412,33 @@ export async function megaDownloadAndExtract(url, destDir, { report, packId, con
       skipDownload = true;
       packLog('Reusing existing pack.enc', { path: encryptedPath, size: formatBytes(encInfo.size) });
       report?.(0.55, 'decrypting', { totalBytes, bytesWritten: totalBytes });
+    } else if (encInfo.exists && encInfo.size === totalBytes) {
+      skipDownload = true;
+      packLog('Reusing existing pack.enc (size match)', { path: encryptedPath, size: formatBytes(encInfo.size) });
+      report?.(0.55, 'decrypting', { totalBytes, bytesWritten: totalBytes });
     }
   } catch (_) { /* fresh download */ }
+
+  if (isNativeStoryPackAvailable() && file.key) {
+    try {
+      await runFullNativeMegaPipeline({
+        downloadUrl,
+        encryptedPath,
+        destDir,
+        key: file.key,
+        totalBytes,
+        packId,
+        report,
+        control,
+        skipDownload,
+      });
+      packLog('MEGA native pipeline complete', { elapsedMs: Date.now() - startedAt });
+      report?.(1, 'saving', { totalBytes });
+      return;
+    } catch (e) {
+      packLog('Full native pipeline failed, falling back to hybrid/JS', e.message);
+    }
+  }
 
   if (!skipDownload) {
     const download = FileSystem.createDownloadResumable(
@@ -288,4 +506,5 @@ export async function megaDownloadAndExtract(url, destDir, { report, packId, con
 export async function cleanupMegaTempFiles(destDir) {
   await FileSystem.deleteAsync(`${destDir}pack.enc`, { idempotent: true });
   await FileSystem.deleteAsync(`${destDir}.pack.enc.meta`, { idempotent: true });
+  await FileSystem.deleteAsync(`${destDir}pack.zip`, { idempotent: true });
 }

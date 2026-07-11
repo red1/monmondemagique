@@ -11,6 +11,10 @@ export async function stopActiveStorySound() {
 }
 
 export function registerStorySound(sound) {
+  if (activeStorySound && activeStorySound !== sound) {
+    activeStorySound.stopAsync().catch(() => {});
+    activeStorySound.unloadAsync().catch(() => {});
+  }
   activeStorySound = sound;
 }
 

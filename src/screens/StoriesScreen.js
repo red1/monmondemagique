@@ -22,12 +22,14 @@ import {
   getDownloadedStories, getValidPlaybackProgress, clearPlaybackProgress,
   getDownloadedStoryIds,
   subscribeStoriesLibrary, rebuildLibraryFromDisk, debugLogLibraryFileSizes, getStoryFilterOptions,
-  formatStoryDurationLabel,
+  isActiveDownloadInProgress,
+  formatStoryDurationLabel, refreshSharedDownloads,
   getSavedPlaylists, saveNamedPlaylist, deleteSavedPlaylist, clearSavedPlaylistProgress,
   getPackUsageCounts, playlistsMatch, getStoryDisplayThumbnail, getPackById,
-  repairStoryThumbnailsForLibrary,
+  repairStoryThumbnailsForLibrary, enrichStoriesLibrary, saveStoryExtraInfo,
 } from '../services/storyService';
 import { useDebouncedValue } from '../utils/useDebouncedValue';
+import { stopActiveStorySound } from '../utils/storyAudio';
 
 const DURATION_MAX_CHIPS = [5, 10, 20];
 const STORIES_PAGE_ROWS = 8;
@@ -71,10 +73,15 @@ const StoriesScreen = () => {
   const [rebuilding, setRebuilding] = useState(false);
   const [visibleCount, setVisibleCount] = useState(STORIES_PAGE_ROWS * numColumns);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [enriching, setEnriching] = useState(false);
+  const [extraInfoStory, setExtraInfoStory] = useState(null);
+  const [extraInfoDraft, setExtraInfoDraft] = useState('');
 
   const pageSize = STORIES_PAGE_ROWS * numColumns;
 
   const thumbnailRepairDoneRef = useRef(false);
+  const launchingPlayerRef = useRef(false);
+  const pendingLibraryRefreshRef = useRef(false);
 
   const sources = getSources();
 
@@ -99,6 +106,15 @@ const StoriesScreen = () => {
   }, []);
 
   const refreshStoriesLight = useCallback(async () => {
+    if (isActiveDownloadInProgress()) {
+      pendingLibraryRefreshRef.current = true;
+      try {
+        const meta = await getDownloadedStories();
+        applyLibraryMeta(meta);
+      } catch (_) { /* keep current list */ }
+      return;
+    }
+    pendingLibraryRefreshRef.current = false;
     try {
       const meta = await getDownloadedStories();
       applyLibraryMeta(meta);
@@ -108,6 +124,16 @@ const StoriesScreen = () => {
       setLoading(false);
     }
   }, [applyLibraryMeta]);
+
+  useEffect(() => {
+    if (!pendingLibraryRefreshRef.current) return undefined;
+    const timer = setInterval(() => {
+      if (!isActiveDownloadInProgress()) {
+        refreshStoriesLight();
+      }
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [refreshStoriesLight]);
 
   const refreshStoriesFull = useCallback(async () => {
     setSyncing(true);
@@ -152,11 +178,14 @@ const StoriesScreen = () => {
     getValidPlaybackProgress().then(setSavedProgress);
     getSavedPlaylists().then(setSavedPlaylists);
     getPackUsageCounts().then(setPackUsageCounts);
-    if (!thumbnailRepairDoneRef.current) {
-      thumbnailRepairDoneRef.current = true;
-      repairStoryThumbnailsForLibrary({ limit: 40 }).then(({ changed }) => {
-        if (changed) refreshStoriesLight();
-      });
+    if (!isActiveDownloadInProgress()) {
+      refreshSharedDownloads().catch(() => {});
+      if (!thumbnailRepairDoneRef.current) {
+        thumbnailRepairDoneRef.current = true;
+        repairStoryThumbnailsForLibrary({ limit: 40 }).then(({ changed }) => {
+          if (changed) refreshStoriesLight();
+        });
+      }
     }
   }, [refreshStoriesLight]));
 
@@ -185,19 +214,26 @@ const StoriesScreen = () => {
       Alert.alert(t.storiesGame, t.storiesNoDownloaded);
       return;
     }
-    if (fresh) {
-      await resetStoriesPlayed();
+    if (launchingPlayerRef.current) return;
+    launchingPlayerRef.current = true;
+    try {
+      if (fresh) {
+        await resetStoriesPlayed();
+      }
+      await stopActiveStorySound();
+      playSound('pop');
+      const navParams = {
+        playlist: JSON.stringify(storyIds),
+        parental: '1',
+      };
+      if (resume) navParams.resume = '1';
+      if (fresh) navParams.fresh = '1';
+      if (startStoryIndex != null) navParams.startStoryIndex = String(startStoryIndex);
+      if (savedPlaylistId) navParams.savedPlaylistId = savedPlaylistId;
+      router.replace({ pathname: '/story_player', params: navParams });
+    } finally {
+      setTimeout(() => { launchingPlayerRef.current = false; }, 400);
     }
-    playSound('pop');
-    const navParams = {
-      playlist: JSON.stringify(storyIds),
-      parental: '1',
-    };
-    if (resume) navParams.resume = '1';
-    if (fresh) navParams.fresh = '1';
-    if (startStoryIndex != null) navParams.startStoryIndex = String(startStoryIndex);
-    if (savedPlaylistId) navParams.savedPlaylistId = savedPlaylistId;
-    router.push({ pathname: '/story_player', params: navParams });
   }, [router, playSound, t, resetStoriesPlayed]);
 
   useEffect(() => {
@@ -276,6 +312,14 @@ const StoriesScreen = () => {
       return [...prev, id];
     });
   }, [playSound]);
+
+  const playStoryDirectly = useCallback((storyId) => {
+    if (parentalStoryLimit === 0) {
+      Alert.alert(t.storiesGame, t.parentalMaxSelected(0));
+      return;
+    }
+    launchPlayer([storyId], { resume: true });
+  }, [launchPlayer, parentalStoryLimit, t]);
 
   const moveQueueItem = (index, direction) => {
     setQueue((prev) => {
@@ -402,6 +446,41 @@ const StoriesScreen = () => {
     }
   };
 
+  const handleEnrichLibrary = async () => {
+    if (enriching) return;
+    setEnriching(true);
+    playSound('pop');
+    try {
+      const result = await enrichStoriesLibrary({ limit: 100 });
+      await refreshStoriesLight();
+      if (result.changed) {
+        Alert.alert(t.success, t.storiesEnrichDone(result.enrichedCount));
+      } else {
+        Alert.alert(t.storiesGame, t.storiesEnrichNone);
+      }
+    } catch (_) {
+      Alert.alert(t.error, t.storiesEnrichNone);
+    } finally {
+      setEnriching(false);
+    }
+  };
+
+  const openExtraInfoEditor = useCallback((story) => {
+    setExtraInfoStory(story);
+    setExtraInfoDraft(story.extraInfo || '');
+    playSound('pop');
+  }, [playSound]);
+
+  const handleSaveExtraInfo = async () => {
+    if (!extraInfoStory) return;
+    await saveStoryExtraInfo(extraInfoStory.storyId, extraInfoDraft);
+    await refreshStoriesLight();
+    setExtraInfoStory(null);
+    setExtraInfoDraft('');
+    playSound('success');
+    Alert.alert(t.success, t.storiesExtraInfoSaved);
+  };
+
   const openCatalog = () => {
     playSound('pop');
     router.push('/story_packages');
@@ -411,6 +490,17 @@ const StoriesScreen = () => {
     <View style={styles.headerActions}>
       <TouchableOpacity style={styles.catalogBtn} onPress={openSavedPlaylists}>
         <Ionicons name="bookmark" size={22} color="white" />
+      </TouchableOpacity>
+      <TouchableOpacity
+        style={styles.catalogBtn}
+        onPress={handleEnrichLibrary}
+        disabled={enriching}
+      >
+        {enriching ? (
+          <ActivityIndicator size="small" color="white" />
+        ) : (
+          <Ionicons name="sparkles" size={22} color="white" />
+        )}
       </TouchableOpacity>
       <TouchableOpacity
         style={styles.catalogBtn}
@@ -450,13 +540,15 @@ const StoriesScreen = () => {
         sourceName={sourceName}
         displayThumbnail={displayThumbnail}
         fallbackThumbnail={packThumbnail !== displayThumbnail ? packThumbnail : null}
-        onPress={() => toggleSelect(storyId)}
+        onPress={() => playStoryDirectly(storyId)}
+        onLongPress={() => toggleSelect(storyId)}
+        onInfoPress={() => openExtraInfoEditor(item)}
         t={t}
       />
     );
   }, [
     cardWidth, queueIndexMap, parentalStoryLimit, queue.length,
-    sourceNameById, packThumbnailById, toggleSelect, t,
+    sourceNameById, packThumbnailById, playStoryDirectly, toggleSelect, openExtraInfoEditor, t,
   ]);
 
   const renderFilterChip = (key, label, active, onPress) => (
@@ -473,37 +565,15 @@ const StoriesScreen = () => {
 
   const listFooter = useMemo(() => {
     if (loading || !filteredStories.length) return null;
-    if (loadingMore) {
-      return (
-        <View style={styles.listFooter}>
-          <ActivityIndicator size="small" color="#00CED1" />
-        </View>
-      );
-    }
-    if (hasMoreStories) {
-      return (
-        <TouchableOpacity style={styles.loadMoreBtn} onPress={loadMoreStories}>
-          <Text style={styles.loadMoreText}>{t.storiesLoadMore}</Text>
-          <Text style={styles.listCountText}>
-            {t.storiesShowingCount(paginatedStories.length, filteredStories.length)}
-          </Text>
-        </TouchableOpacity>
-      );
-    }
-    if (filteredStories.length > pageSize) {
-      return (
-        <View style={styles.listFooter}>
-          <Text style={styles.listCountText}>
-            {t.storiesShowingCount(filteredStories.length, filteredStories.length)}
-          </Text>
-        </View>
-      );
-    }
-    return null;
-  }, [
-    loading, filteredStories.length, loadingMore, hasMoreStories, loadMoreStories,
-    t, paginatedStories.length, pageSize,
-  ]);
+    if (filteredStories.length <= pageSize) return null;
+    return (
+      <View style={styles.listFooter}>
+        <Text style={styles.listCountText}>
+          {t.storiesShowingCount(paginatedStories.length, filteredStories.length)}
+        </Text>
+      </View>
+    );
+  }, [loading, filteredStories.length, t, paginatedStories.length, pageSize]);
 
   return (
     <View style={styles.container}>
@@ -608,10 +678,41 @@ const StoriesScreen = () => {
         {syncing && (
           <View style={styles.syncBanner}>
             <ActivityIndicator size="small" color="#00CED1" />
-            <Text style={styles.syncBannerText}>{t.storiesSyncing}</Text>
+            <Text style={styles.syncBannerText}>
+              {enriching ? t.storiesEnriching : t.storiesSyncing}
+            </Text>
           </View>
         )}
       </View>
+
+      <Modal visible={!!extraInfoStory} transparent animationType="slide">
+        <Pressable style={styles.packModalOverlay} onPress={() => setExtraInfoStory(null)}>
+          <Pressable style={styles.extraInfoSheet} onPress={(e) => e.stopPropagation()}>
+            <Text style={styles.extraInfoTitle}>{t.storiesExtraInfoTitle}</Text>
+            {extraInfoStory ? (
+              <Text style={styles.extraInfoStoryName} numberOfLines={2}>{extraInfoStory.title}</Text>
+            ) : null}
+            <Text style={styles.extraInfoHint}>{t.storiesExtraInfoHint}</Text>
+            <TextInput
+              style={styles.extraInfoInput}
+              placeholder={t.storiesExtraInfoPlaceholder}
+              placeholderTextColor="#999"
+              value={extraInfoDraft}
+              onChangeText={setExtraInfoDraft}
+              multiline
+              numberOfLines={4}
+            />
+            <View style={styles.extraInfoActions}>
+              <TouchableOpacity style={styles.extraInfoCancel} onPress={() => setExtraInfoStory(null)}>
+                <Text style={styles.extraInfoCancelText}>{t.back}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.extraInfoSave} onPress={handleSaveExtraInfo}>
+                <Text style={styles.extraInfoSaveText}>{t.save}</Text>
+              </TouchableOpacity>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       <Modal visible={showPackPicker} transparent animationType="slide">
         <Pressable style={styles.packModalOverlay} onPress={() => setShowPackPicker(false)}>
@@ -657,6 +758,7 @@ const StoriesScreen = () => {
       </Modal>
 
       <FlatList
+        style={styles.storyList}
         data={paginatedStories}
         keyExtractor={(item) => item.storyId}
         numColumns={numColumns}
@@ -671,9 +773,7 @@ const StoriesScreen = () => {
         initialNumToRender={Math.min(10, pageSize)}
         maxToRenderPerBatch={8}
         windowSize={5}
-        removeClippedSubviews
-        onEndReached={loadMoreStories}
-        onEndReachedThreshold={0.35}
+        removeClippedSubviews={false}
         ListFooterComponent={listFooter}
         ListEmptyComponent={
           loading && !playableStories.length ? (
@@ -727,6 +827,26 @@ const StoriesScreen = () => {
           )
         }
       />
+
+      {hasMoreStories && !loading ? (
+        <TouchableOpacity
+          style={[styles.loadMoreBar, { marginBottom: queue.length ? 8 : 0 }]}
+          onPress={loadMoreStories}
+          disabled={loadingMore}
+        >
+          {loadingMore ? (
+            <ActivityIndicator size="small" color="#00CED1" />
+          ) : (
+            <>
+              <Ionicons name="chevron-down-circle" size={22} color="#00CED1" />
+              <Text style={styles.loadMoreText}>{t.storiesLoadMore}</Text>
+              <Text style={styles.listCountText}>
+                {t.storiesShowingCount(paginatedStories.length, filteredStories.length)}
+              </Text>
+            </>
+          )}
+        </TouchableOpacity>
+      ) : null}
 
       {queue.length > 0 ? (
         <View style={[styles.queueBarWrap, { paddingBottom: Math.max(insets.bottom, 8) }]}>
@@ -824,6 +944,7 @@ const StoriesScreen = () => {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFF5E1' },
+  storyList: { flex: 1 },
   catalogBtn: {
     width: 40, height: 40, borderRadius: 20,
     backgroundColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center',
@@ -961,8 +1082,35 @@ const styles = StyleSheet.create({
     marginTop: 4, marginBottom: 8, borderRadius: 20,
     backgroundColor: 'white', borderWidth: 2, borderColor: '#00CED1',
   },
+  loadMoreBar: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    marginHorizontal: 16, marginTop: 4, paddingVertical: 12, paddingHorizontal: 16,
+    borderRadius: 20, backgroundColor: 'white', borderWidth: 2, borderColor: '#00CED1',
+    elevation: 4, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1,
+  },
   loadMoreText: { fontSize: 14, fontFamily: 'Fredoka-SemiBold', color: '#00CED1' },
-  listCountText: { fontSize: 12, fontFamily: 'Fredoka-SemiBold', color: '#888', marginTop: 4 },
+  listCountText: { fontSize: 12, fontFamily: 'Fredoka-SemiBold', color: '#888', marginTop: 0 },
+  extraInfoSheet: {
+    backgroundColor: 'white', borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    padding: 20, paddingBottom: 28, gap: 10,
+  },
+  extraInfoTitle: { fontSize: 20, fontFamily: 'Fredoka-SemiBold', color: '#333', textAlign: 'center' },
+  extraInfoStoryName: { fontSize: 14, color: '#9B59B6', fontFamily: 'Fredoka-SemiBold', textAlign: 'center' },
+  extraInfoHint: { fontSize: 12, color: '#888', fontFamily: 'Fredoka-SemiBold', textAlign: 'center' },
+  extraInfoInput: {
+    minHeight: 100, backgroundColor: '#f8f8f8', borderRadius: 16, padding: 14,
+    fontSize: 15, fontFamily: 'Fredoka-SemiBold', borderWidth: 2, borderColor: '#9B59B6',
+    textAlignVertical: 'top',
+  },
+  extraInfoActions: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, marginTop: 8 },
+  extraInfoCancel: {
+    flex: 1, paddingVertical: 12, borderRadius: 20, backgroundColor: '#eee', alignItems: 'center',
+  },
+  extraInfoCancelText: { fontFamily: 'Fredoka-SemiBold', color: '#666' },
+  extraInfoSave: {
+    flex: 1, paddingVertical: 12, borderRadius: 20, backgroundColor: '#9B59B6', alignItems: 'center',
+  },
+  extraInfoSaveText: { fontFamily: 'Fredoka-SemiBold', color: 'white' },
   queueBarWrap: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
     backgroundColor: 'white', elevation: 12,

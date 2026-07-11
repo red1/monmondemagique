@@ -12,8 +12,14 @@ import {
 } from './luniiStoryParser';
 import {
   streamUnzipFromFile,
+  yieldToEventLoop,
+  setExtractionFastMode,
 } from './zipExtract';
+import { isNativeZipAvailable, nativeUnzipToDirectory } from './nativeZip';
 import catalogData from '../../assets/stories/catalog.json';
+import {
+  mergeSharedMp3IntoMetaAsync, notifySharedMediaUpdated, scanDownloadsFolder,
+} from './sharedMediaService';
 
 if (typeof global.Buffer === 'undefined') {
   global.Buffer = Buffer;
@@ -60,12 +66,19 @@ let libraryBulkUpdateDepth = 0;
 export function notifyStoriesLibraryUpdated() {
   if (libraryBulkUpdateDepth > 0) return;
   if (libraryNotifyTimer) clearTimeout(libraryNotifyTimer);
-  const debounceMs = activeDownloadCount > 0 ? 2000 : 300;
+  const debounceMs = activeDownloadCount > 0 ? 5000 : 300;
   libraryNotifyTimer = setTimeout(() => {
     libraryNotifyTimer = null;
-    libraryListeners.forEach((listener) => {
-      try { listener(); } catch (_) { /* ignore */ }
-    });
+    const runListeners = () => {
+      libraryListeners.forEach((listener) => {
+        try { listener(); } catch (_) { /* ignore */ }
+      });
+    };
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(runListeners);
+    } else {
+      runListeners();
+    }
   }, debounceMs);
 }
 
@@ -145,10 +158,19 @@ export function getSourceById(sourceId) {
 
 export function beginActiveDownload() {
   activeDownloadCount += 1;
+  if (activeDownloadCount === 1) setExtractionFastMode(true);
 }
 
 export function endActiveDownload() {
   activeDownloadCount = Math.max(0, activeDownloadCount - 1);
+  if (activeDownloadCount === 0) {
+    setExtractionFastMode(false);
+    flushDeferredLibraryIndex().catch(() => {});
+  }
+}
+
+export function isActiveDownloadInProgress() {
+  return activeDownloadCount > 0;
 }
 
 function invalidateStoriesMetaCache() {
@@ -195,6 +217,8 @@ async function loadLibraryIndex() {
   }
 }
 
+let libraryIndexDirty = false;
+
 async function saveLibraryIndex(meta) {
   await ensureStoriesDir();
   await FileSystem.writeAsStringAsync(
@@ -222,8 +246,22 @@ async function loadStoriesMeta({ force = false } = {}) {
 async function saveStoriesMeta(meta) {
   storiesMetaCache = meta;
   libraryIndexUpdatedAt = Date.now();
-  await AsyncStorage.setItem(STORIES_META_KEY, JSON.stringify(meta));
-  await saveLibraryIndex(meta);
+  if (activeDownloadCount > 0) await yieldToEventLoop();
+  const serialized = JSON.stringify(meta);
+  if (activeDownloadCount > 0) await yieldToEventLoop();
+  await AsyncStorage.setItem(STORIES_META_KEY, serialized);
+  if (activeDownloadCount > 0) {
+    libraryIndexDirty = true;
+  } else {
+    await saveLibraryIndex(meta);
+  }
+}
+
+async function flushDeferredLibraryIndex() {
+  if (!libraryIndexDirty || !storiesMetaCache) return;
+  libraryIndexDirty = false;
+  await yieldToEventLoop();
+  await saveLibraryIndex(storiesMetaCache);
 }
 
 async function loadPackagesMeta() {
@@ -247,13 +285,17 @@ function withMetaLock(task) {
 }
 
 export async function getDownloadedStories({ force = false } = {}) {
-  return loadStoriesMeta({ force });
+  const meta = await loadStoriesMeta({ force });
+  return mergeSharedMp3IntoMetaAsync(meta, {
+    force,
+    skipScan: isActiveDownloadInProgress(),
+  });
 }
 
 export async function getPlayableStories({ syncOnLoad = false } = {}) {
   await migrateLegacyMeta();
   const metaIsFresh = storiesMetaCache && Date.now() - libraryIndexUpdatedAt < LIBRARY_FRESH_MS;
-  if (syncOnLoad) {
+  if (syncOnLoad && !isActiveDownloadInProgress()) {
     await rebuildLibraryFromDisk({ incremental: false });
   } else if (!metaIsFresh) {
     scheduleBackgroundLibrarySync();
@@ -261,7 +303,7 @@ export async function getPlayableStories({ syncOnLoad = false } = {}) {
   if (!metaIsFresh) {
     scheduleBackgroundMp3Enrich();
   }
-  const meta = await loadStoriesMeta();
+  const meta = await mergeSharedMp3IntoMetaAsync(await loadStoriesMeta());
   return Object.values(meta).sort((a, b) => (a.title || '').localeCompare(b.title || ''));
 }
 
@@ -273,6 +315,7 @@ const MAX_BACKGROUND_ENRICH_ROUNDS = 20;
 
 function scheduleBackgroundLibrarySync() {
   if (backgroundSyncTimer || syncInFlight) return;
+  if (isActiveDownloadInProgress()) return;
   if (storiesMetaCache && Date.now() - libraryIndexUpdatedAt < LIBRARY_FRESH_MS) return;
   backgroundSyncTimer = setTimeout(async () => {
     backgroundSyncTimer = null;
@@ -330,11 +373,13 @@ async function repairStoryThumbnails({ limit = 30 } = {}) {
 }
 
 export async function repairStoryThumbnailsForLibrary({ limit = 40 } = {}) {
+  if (isActiveDownloadInProgress()) return { changed: false };
   return repairStoryThumbnails({ limit });
 }
 
 function scheduleBackgroundMp3Enrich() {
   if (backgroundEnrichTimer) return;
+  if (isActiveDownloadInProgress()) return;
   if (backgroundEnrichRounds >= MAX_BACKGROUND_ENRICH_ROUNDS) return;
   backgroundEnrichTimer = setTimeout(async () => {
     backgroundEnrichTimer = null;
@@ -357,6 +402,7 @@ export async function syncLibraryFromDisk() {
 }
 
 export async function rebuildLibraryFromDisk({ incremental = false } = {}) {
+  if (isActiveDownloadInProgress()) return 0;
   await ensureStoriesDir();
   if (!incremental) {
     await saveStoriesMeta({});
@@ -401,12 +447,70 @@ export async function rebuildLibraryFromDisk({ incremental = false } = {}) {
     if (incremental && synced === 0) {
       await enrichStoriesDurations({ limit: 200 });
     }
+
+    await scanDownloadsFolder({ force: true });
+    notifySharedMediaUpdated();
   } finally {
     endBulkLibraryUpdate();
   }
 
   if (synced > 0) packLog('Library rebuilt from disk', { stories: synced, incremental });
   return synced;
+}
+
+/** Concatenated searchable text from title, tags, notes, etc. */
+export function buildStoryInfoText(story) {
+  return [
+    story.title,
+    story.packTitle,
+    story.artist,
+    story.album,
+    story.genre,
+    story.extraInfo,
+    story.contentType === 'song' ? 'chanson song musique' : story.contentType === 'story' ? 'histoire story' : '',
+  ].filter(Boolean).join(' ').trim();
+}
+
+function applyStoryInfoText(story) {
+  return { ...story, infoText: buildStoryInfoText(story) };
+}
+
+export async function saveStoryExtraInfo(storyId, extraInfo) {
+  const meta = await loadStoriesMeta();
+  if (!meta[storyId]) return false;
+  meta[storyId] = applyStoryInfoText({
+    ...meta[storyId],
+    extraInfo: (extraInfo || '').trim(),
+  });
+  await saveStoriesMeta(meta);
+  notifyStoriesLibraryUpdated();
+  return true;
+}
+
+/** Manual enrichment: MP3 tags, durations, thumbnails, infoText index. */
+export async function enrichStoriesLibrary({ limit = 80 } = {}) {
+  await enrichStoriesMeta();
+  const { durationValuesChanged } = await enrichStoriesDurations({ limit });
+  const { metadataChanged } = await enrichStoriesWithMp3Metadata({ limit: Math.min(limit, 60) });
+
+  const meta = await loadStoriesMeta();
+  let infoChanged = false;
+  let enrichedCount = 0;
+  for (const [storyId, story] of Object.entries(meta)) {
+    const updated = applyStoryInfoText(story);
+    if (updated.infoText !== story.infoText) {
+      meta[storyId] = updated;
+      infoChanged = true;
+    }
+    if (story.artist || story.album || story.genre || story.extraInfo || story.durationMs) {
+      enrichedCount += 1;
+    }
+  }
+  if (infoChanged) await saveStoriesMeta(meta);
+
+  const changed = durationValuesChanged || metadataChanged || infoChanged;
+  if (changed) notifyStoriesLibraryUpdated();
+  return { changed, enrichedCount, total: Object.keys(meta).length };
 }
 
 export function getStoryFilterOptions(stories = [], packUsageCounts = {}) {
@@ -757,13 +861,10 @@ export function filterPlayableStories({
     if (album && story.album !== album) return false;
     if (artistQuery && !(story.artist || '').toLowerCase().includes(artistQuery)) return false;
     if (query) {
-      const haystack = [
-        story.title,
-        story.packTitle,
-        story.artist,
-        story.album,
-        story.genre,
-      ].filter(Boolean).join(' ').toLowerCase();
+      const haystack = (
+        story.infoText
+        || buildStoryInfoText(story)
+      ).toLowerCase();
       if (!haystack.includes(query)) return false;
     }
     const durationMs = getStoryDurationMs(story);
@@ -957,7 +1058,7 @@ async function enrichStoriesWithMp3Metadata({ limit = 20 } = {}) {
           || merged.durationMs !== before.durationMs
           || merged.audioTracks?.[0]?.durationMs !== before.trackDurationMs;
         if (changed) {
-          meta[storyId] = merged;
+          meta[storyId] = applyStoryInfoText(merged);
           metadataChanged = true;
         }
       }
@@ -1172,7 +1273,9 @@ async function extractStoriesFromAssets(packDir, pack) {
   const mp3Files = files.filter((file) => file.toLowerCase().endsWith('.mp3'));
   const withSize = [];
 
-  for (const file of mp3Files) {
+  for (let i = 0; i < mp3Files.length; i += 1) {
+    const file = mp3Files[i];
+    if (i > 0 && i % 12 === 0) await yieldToEventLoop();
     try {
       const uri = `${assetsDir}${file}`;
       const fileInfo = await FileSystem.getInfoAsync(uri, { size: true });
@@ -1201,13 +1304,31 @@ async function extractStoriesFromAssets(packDir, pack) {
 
 async function finalizeExtractedStories(stories, packDir, pack, { fast = false } = {}) {
   const resolved = [];
+  let processed = 0;
 
   for (const story of stories) {
     try {
+      if (fast && processed > 0 && processed % 8 === 0) {
+        await yieldToEventLoop();
+      }
+      processed += 1;
+
       const track = story.audioTracks?.[0];
       if (!track?.uri && !packDir) continue;
 
-      const file = await resolveAudioFileInfo(track, packDir);
+      let file;
+      if (fast && track?.uri) {
+        try {
+          const info = await FileSystem.getInfoAsync(track.uri, { size: true });
+          file = info.exists && info.size > 0
+            ? { uri: track.uri, exists: true, size: info.size || 0 }
+            : { uri: track.uri, exists: false, size: 0 };
+        } catch (_) {
+          file = { uri: track.uri, exists: false, size: 0 };
+        }
+      } else {
+        file = await resolveAudioFileInfo(track, packDir);
+      }
       if (!file.exists) {
         quickTrackDurationMs(track, 0, {
           storyId: story.storyId,
@@ -1353,31 +1474,14 @@ function makeReporter(onProgress) {
 }
 
 function createPartialSaver(packId, pack, packDir, report) {
-  let lastSave = 0;
-  let inFlight = false;
-  let filesSinceSave = 0;
+  let extractedCount = 0;
 
   return async (fileName) => {
-    const isRelevant = !fileName || /\.(mp3|json)$/i.test(fileName);
-    if (!isRelevant) return;
-
-    filesSinceSave += 1;
-    const now = Date.now();
-    const shouldSave = filesSinceSave >= 12 || now - lastSave >= 10000;
-    if (!shouldSave || inFlight || now - lastSave < 5000) return;
-
-    inFlight = true;
-    try {
-      const partial = await trySavePartialPack(packId, pack, packDir, { partial: true, fast: true });
-      if (partial?.stories?.length) {
-        lastSave = Date.now();
-        filesSinceSave = 0;
-        notifyStoriesLibraryUpdated();
-        report?.(null, 'extracting', { storiesSaved: partial.stories.length });
-      }
-    } catch (_) { /* ignore mid-download save errors */ }
-    finally {
-      inFlight = false;
+    if (!fileName || !/\.mp3$/i.test(fileName)) return;
+    extractedCount += 1;
+    if (extractedCount % 4 === 0) {
+      report?.(null, 'extracting', { extractedCount });
+      await yieldToEventLoop();
     }
   };
 }
@@ -1442,17 +1546,38 @@ async function downloadFile(url, destPath, report, packId, control) {
 }
 
 async function unzipToDirectory(zipPath, destDir, packId, report, control, onFileExtracted) {
-  packLog('Stream unzip start', { packId, zipPath });
+  packLog('Unzip start', { packId, zipPath, nativeZip: isNativeZipAvailable() });
   const startedAt = Date.now();
-  await streamUnzipFromFile(zipPath, destDir, {
-    control,
-    onFileExtracted,
-    report: (progress, status, extra) => report?.(progress, status, extra),
-    formatBytes,
-    log: packLog,
-    progressStart: 0.55,
-    progressSpan: 0.35,
-  });
+
+  if (isNativeZipAvailable()) {
+    report?.(0.55, 'unzipping');
+    const result = await nativeUnzipToDirectory(zipPath, destDir, {
+      onProgress: (progress) => {
+        report?.(0.55 + progress * 0.35, 'extracting');
+      },
+    });
+    if (result.native) {
+      packLog('Native unzip done', { packId, elapsedMs: Date.now() - startedAt });
+      return;
+    }
+    packLog('Native unzip unavailable, using JS stream', { packId });
+  }
+
+  setExtractionFastMode(false);
+  try {
+    await streamUnzipFromFile(zipPath, destDir, {
+      control,
+      onFileExtracted,
+      report: (progress, status, extra) => report?.(progress, status, extra),
+      formatBytes,
+      log: packLog,
+      progressStart: 0.55,
+      progressSpan: 0.35,
+      fastMode: false,
+    });
+  } finally {
+    setExtractionFastMode(true);
+  }
   packLog('Stream unzip done', { packId, elapsedMs: Date.now() - startedAt });
 }
 
@@ -1518,11 +1643,13 @@ async function assessPackDir(packDir, pack, { fast = false } = {}) {
   }
 
   const requiredPaths = getRequiredPackRelPaths(storyJson).map(resolvePackAudioRelPath);
-  // story.json is always required at pack root
   if (!requiredPaths.includes('story.json')) requiredPaths.unshift('story.json');
-  let missing = await findMissingPackFiles(packDir, requiredPaths);
+  let missing = [];
+  if (!fast) {
+    missing = await findMissingPackFiles(packDir, requiredPaths);
+  }
 
-  if (requiredPaths.length <= 1) {
+  if (!fast && requiredPaths.length <= 1) {
     const assetsDir = `${packDir}assets/`;
     const assetsInfo = await FileSystem.getInfoAsync(assetsDir);
     if (!assetsInfo.exists) missing = ['assets/'];
@@ -1545,23 +1672,28 @@ async function assessPackDir(packDir, pack, { fast = false } = {}) {
   };
 }
 
-async function mergeValidPackStories(packId, newStories) {
+async function mergeValidPackStories(packId, newStories, { fast = false } = {}) {
   const storiesMeta = await loadStoriesMeta();
   const merged = new Map();
 
   for (const story of Object.values(storiesMeta)) {
     if (story.packId !== packId) continue;
-    if (await isStoryAudioValid(story)) merged.set(story.storyId, story);
+    if (fast) {
+      merged.set(story.storyId, story);
+    } else if (await isStoryAudioValid(story)) {
+      merged.set(story.storyId, story);
+    }
   }
   for (const story of newStories) {
-    if (await isStoryAudioValid(story)) merged.set(story.storyId, story);
+    if (fast || await isStoryAudioValid(story)) merged.set(story.storyId, story);
   }
 
   return [...merged.values()];
 }
 
-async function savePackMetadata(packId, pack, packDir, stories, { partial = false } = {}) {
-  const mergedStories = await mergeValidPackStories(packId, stories);
+async function savePackMetadata(packId, pack, packDir, stories, { partial = false, fast = false } = {}) {
+  if (fast) await yieldToEventLoop();
+  const mergedStories = await mergeValidPackStories(packId, stories, { fast });
   if (!mergedStories.length) return null;
 
   await withMetaLock(async () => {
@@ -1605,6 +1737,7 @@ async function trySavePartialPack(packId, pack, packDir, { partial = true, fast 
 
   const result = await savePackMetadata(packId, pack, packDir, assessment.stories, {
     partial: partial && !assessment.filesComplete,
+    fast,
   });
   if (!result) return null;
 
@@ -1690,7 +1823,7 @@ async function downloadPackageInternal(packId, onProgress, control) {
   const onPartialSave = createPartialSaver(packId, pack, packDir, report);
 
   const isMega = pack.downloadUrl.includes('mega.nz');
-  const preCheck = await assessPackDir(packDir, pack);
+  const preCheck = await assessPackDir(packDir, pack, { fast: true });
   if (preCheck.filesComplete && preCheck.canExtract) {
     packLog('Pack files already complete, refreshing metadata only', {
       packId,
@@ -1714,7 +1847,7 @@ async function downloadPackageInternal(packId, onProgress, control) {
       existingStories: preCheck.stories.length,
       missing: preCheck.missing,
     });
-    await trySavePartialPack(packId, pack, packDir);
+    await trySavePartialPack(packId, pack, packDir, { partial: true, fast: true });
   }
 
   try {
@@ -1743,7 +1876,7 @@ async function downloadPackageInternal(packId, onProgress, control) {
     const jsonInfo = await FileSystem.getInfoAsync(storyJsonPath);
     if (!jsonInfo.exists) {
       packLog('Missing story.json', storyJsonPath);
-      const partial = await trySavePartialPack(packId, pack, packDir);
+      const partial = await trySavePartialPack(packId, pack, packDir, { fast: true });
       if (partial?.stories?.length) {
         throw new Error(`story.json manquant — ${partial.stories.length} fichier(s) audio conservé(s)`);
       }
@@ -1764,7 +1897,7 @@ async function downloadPackageInternal(packId, onProgress, control) {
 
     if (extractedStories.length === 0) {
       packLog('No usable audio after story.json + assets scan', { packId });
-      const partial = await trySavePartialPack(packId, pack, packDir);
+      const partial = await trySavePartialPack(packId, pack, packDir, { fast: true });
       if (partial?.stories?.length) {
         report?.(1, 'saving');
         if (isMega) await cleanupMegaTempFiles(packDir);
@@ -1796,7 +1929,7 @@ async function downloadPackageInternal(packId, onProgress, control) {
     if (e.name === 'DownloadCancelledError') {
       packLog('Download cancelled', { packId, elapsedMs: Date.now() - startedAt });
       try {
-        const partial = await trySavePartialPack(packId, pack, packDir);
+        const partial = await trySavePartialPack(packId, pack, packDir, { fast: true });
         if (partial?.stories?.length) {
           packLog('Partial pack preserved after cancel', {
             packId,
@@ -1811,7 +1944,7 @@ async function downloadPackageInternal(packId, onProgress, control) {
 
     packLog('Download package failed', { packId, message: e.message, elapsedMs: Date.now() - startedAt });
     try {
-      const partial = await trySavePartialPack(packId, pack, packDir);
+      const partial = await trySavePartialPack(packId, pack, packDir, { fast: true });
       if (partial?.stories?.length) {
         packLog('Partial pack preserved', {
           packId,
@@ -2186,8 +2319,16 @@ export function buildPlaylist(storyIds, downloadedMeta) {
   return items;
 }
 
+export async function refreshSharedDownloads() {
+  if (isActiveDownloadInProgress()) return null;
+  const result = await scanDownloadsFolder({ force: true });
+  notifySharedMediaUpdated();
+  notifyStoriesLibraryUpdated();
+  return result;
+}
+
 export async function getDownloadedStoryIds() {
-  const meta = await loadStoriesMeta();
+  const meta = await mergeSharedMp3IntoMetaAsync(await loadStoriesMeta());
   return Object.keys(meta);
 }
 

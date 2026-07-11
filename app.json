@@ -11,18 +11,41 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.monmondemagique.app"
+      "bundleIdentifier": "com.monmondemagique.app",
+      "UIFileSharingEnabled": true,
+      "LSSupportsOpeningDocumentsInPlace": true,
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio"
+        ]
+      }
     },
     "android": {
-      "package": "com.monmondemagique.app"
+      "package": "com.monmondemagique.app",
+      "permissions": [
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ]
     },
     "web": {
       "bundler": "metro"
     },
     "plugins": [
+      "./plugins/withStoryPackPipeline",
       "expo-router",
       "expo-image-picker",
-      "expo-media-library",
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Autorise $(PRODUCT_NAME) à accéder à tes photos et vidéos téléchargées.",
+          "savePhotosPermission": "Autorise $(PRODUCT_NAME) à enregistrer des fichiers.",
+          "isAccessMediaLocationEnabled": false,
+          "granularPermissions": [
+            "audio",
+            "video"
+          ]
+        }
+      ],
       "expo-updates",
       [
         "expo-font",
@@ -30,6 +53,18 @@
           "fonts": [
             "./assets/fonts/Fredoka-SemiBold.ttf"
           ]
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "enableBackgroundPlayback": true
+        }
+      ],
+      [
+        "expo-video",
+        {
+          "supportsBackgroundPlayback": true
         }
       ]
     ],

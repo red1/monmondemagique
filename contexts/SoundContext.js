@@ -9,8 +9,10 @@ export const SoundProvider = ({ children }) => {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [musicEnabled, setMusicEnabled] = useState(true);
   const [bgmSound, setBgmSound] = useState(null);
-  const storyPlaybackRef = useRef(false);
+  const mediaPlaybackDepthRef = useRef(0);
   const bgmWasPlayingRef = useRef(false);
+
+  const isMediaPlaying = useCallback(() => mediaPlaybackDepthRef.current > 0, []);
 
   useEffect(() => {
     Audio.setAudioModeAsync({
@@ -33,7 +35,7 @@ export const SoundProvider = ({ children }) => {
         );
         soundObject = sound;
         setBgmSound(sound);
-        if (musicEnabled && !storyPlaybackRef.current) await sound.playAsync();
+        if (musicEnabled && !isMediaPlaying()) await sound.playAsync();
       } catch (error) {
         console.log("Error loading music:", error);
       }
@@ -49,23 +51,37 @@ export const SoundProvider = ({ children }) => {
   // Toggle Music Playback
   useEffect(() => {
     const toggleMusic = async () => {
-      if (bgmSound && !storyPlaybackRef.current) {
+      if (!bgmSound || isMediaPlaying()) {
+        if (bgmSound && isMediaPlaying()) {
+          try { await bgmSound.pauseAsync(); } catch (_) { /* ignore */ }
+        }
+        return;
+      }
+      try {
         if (musicEnabled) {
           await bgmSound.playAsync();
         } else {
           await bgmSound.pauseAsync();
         }
-      }
+      } catch (_) { /* ignore */ }
     };
     toggleMusic();
-  }, [musicEnabled, bgmSound]);
+  }, [musicEnabled, bgmSound, isMediaPlaying]);
+
+  // If BGM loads while a story/video is already playing, keep it paused.
+  useEffect(() => {
+    if (!bgmSound || !isMediaPlaying()) return;
+    bgmSound.pauseAsync().catch(() => {});
+  }, [bgmSound, isMediaPlaying]);
 
   const pauseBackgroundMusic = useCallback(async () => {
     if (!bgmSound) return;
     try {
       const status = await bgmSound.getStatusAsync();
-      bgmWasPlayingRef.current = status.isLoaded && status.isPlaying;
-      if (bgmWasPlayingRef.current) await bgmSound.pauseAsync();
+      if (status.isLoaded) {
+        bgmWasPlayingRef.current = status.isPlaying;
+        await bgmSound.pauseAsync();
+      }
     } catch (_) { /* ignore */ }
   }, [bgmSound]);
 
@@ -78,7 +94,9 @@ export const SoundProvider = ({ children }) => {
   }, [bgmSound, musicEnabled]);
 
   const beginStoryPlayback = useCallback(async () => {
-    storyPlaybackRef.current = true;
+    mediaPlaybackDepthRef.current += 1;
+    if (mediaPlaybackDepthRef.current > 1) return;
+
     await pauseBackgroundMusic();
     await Audio.setAudioModeAsync({
       playsInSilentModeIOS: true,
@@ -90,7 +108,9 @@ export const SoundProvider = ({ children }) => {
   }, [pauseBackgroundMusic]);
 
   const endStoryPlayback = useCallback(async () => {
-    storyPlaybackRef.current = false;
+    mediaPlaybackDepthRef.current = Math.max(0, mediaPlaybackDepthRef.current - 1);
+    if (mediaPlaybackDepthRef.current > 0) return;
+
     await Audio.setAudioModeAsync({
       playsInSilentModeIOS: true,
       staysActiveInBackground: false,
@@ -102,7 +122,7 @@ export const SoundProvider = ({ children }) => {
   }, [resumeBackgroundMusic]);
 
   const playSound = useCallback(async (type) => {
-    if (!soundEnabled || storyPlaybackRef.current) return;
+    if (!soundEnabled || isMediaPlaying()) return;
 
     try {
       let soundFile;
@@ -151,7 +171,7 @@ export const SoundProvider = ({ children }) => {
     } catch (error) {
       console.log('Sound error:', error.message);
     }
-  }, [soundEnabled]);
+  }, [soundEnabled, isMediaPlaying]);
 
   const contextValue = useMemo(() => ({
     soundEnabled,

@@ -16,12 +16,12 @@ import {
 import { useSounds } from '../../../contexts/SoundContext';
 
 const GLITTER_SOURCES = {
-  glitter: require('../../../assets/sprites/glitter.gif'),
-  glitter2: require('../../../assets/sprites/glitter2.gif'),
-  glitter3: require('../../../assets/sprites/glitter3.gif'),
-  glitter4: require('../../../assets/sprites/glitter4.gif'),
-  glitter5: require('../../../assets/sprites/glitter5.gif'),
-  glitter6: require('../../../assets/sprites/glitter6.gif'),
+    glitter: require('../../../assets/sprites/glitter.gif'),
+    glitter2: require('../../../assets/sprites/glitter2.gif'),
+    glitter3: require('../../../assets/sprites/glitter3.gif'),
+    glitter4: require('../../../assets/sprites/glitter4.gif'),
+    glitter5: require('../../../assets/sprites/glitter5.gif'),
+    glitter6: require('../../../assets/sprites/glitter6.gif'),
 };
 
 /**
@@ -182,15 +182,13 @@ const SimpleColoringCanvas = forwardRef(({
     if (!canvasRef.current || s.canvasSize.width === 0) return;
 
     try {
-        const { x: canvasX, y: canvasY } = toCanvas(viewX, viewY, s.zoomScale, s.zoomOffset);
         const snapshot = canvasRef.current.makeImageSnapshot();
         const w = Math.floor(snapshot.width());
         const h = Math.floor(snapshot.height());
         
-        const scaleX = w / s.canvasSize.width;
-        const scaleY = h / s.canvasSize.height;
-        const x = Math.max(0, Math.min(w - 1, Math.floor(canvasX * scaleX)));
-        const y = Math.max(0, Math.min(h - 1, Math.floor(canvasY * scaleY)));
+        // Snapshot is in view space; sample at the touched pixel
+        const x = Math.floor(viewX * (w / s.canvasSize.width));
+        const y = Math.floor(viewY * (h / s.canvasSize.height));
 
         const pixels = snapshot.readPixels(0, 0, {
             width: w,
@@ -215,8 +213,8 @@ const SimpleColoringCanvas = forwardRef(({
 
         if (!isWhite(x, y)) return;
 
-        const layoutScaleX = s.canvasSize.width / w;
-        const layoutScaleY = s.canvasSize.height / h;
+        const scaleX = s.canvasSize.width / w;
+        const scaleY = s.canvasSize.height / h;
 
         while (stack.length > 0) {
             let [cX, cY] = stack.pop();
@@ -225,16 +223,19 @@ const SimpleColoringCanvas = forwardRef(({
             let rX = cX;
             while (rX < w - 1 && isWhite(rX + 1, cY)) rX++;
             
-            const leftX = lX * layoutScaleX;
-            const rightX = (rX + 1) * layoutScaleX;
-            const topY = cY * layoutScaleY;
-            const rowHeight = layoutScaleY + 0.2;
+            const viewLeft = lX * scaleX;
+            const viewTop = cY * scaleY;
+            const viewRight = (rX + 1) * scaleX;
+            const viewBottom = (cY + 1) * scaleY;
+
+            const topLeft = toCanvas(viewLeft, viewTop, s.zoomScale, s.zoomOffset);
+            const bottomRight = toCanvas(viewRight, viewBottom, s.zoomScale, s.zoomOffset);
 
             fillPath.addRect({
-                x: leftX,
-                y: topY,
-                width: rightX - leftX,
-                height: rowHeight,
+                x: topLeft.x,
+                y: topLeft.y,
+                width: bottomRight.x - topLeft.x,
+                height: bottomRight.y - topLeft.y,
             });
 
             for (let i = lX; i <= rX; i++) {
@@ -332,7 +333,9 @@ const SimpleColoringCanvas = forwardRef(({
           { translateY: zoomOffset.y },
           { scale: zoomScale },
         ]}>
+          {/* White background inside zoom group so flood-fill snapshot matches drawing space */}
           <Path path={Skia.Path.Make().addRect({x:0,y:0,width:canvasSize.width,height:canvasSize.height})} color="white" />
+
           {/* Layer 2: Committed Drawings and Magic Fills */}
           {paths.map((p, index) => (
             <Path 

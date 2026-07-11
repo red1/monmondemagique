@@ -4,13 +4,30 @@ import { Unzip, UnzipInflate } from 'fflate';
 
 export const MAX_SAFE_WRITE_BYTES = 12 * 1024 * 1024;
 /** Parallel native file writes — disk I/O scales better than JS CPU work. */
-export const MAX_WRITE_CONCURRENCY = 8;
+export const MAX_WRITE_CONCURRENCY = 16;
 /** Read zip/encrypted payloads in large chunks to cut bridge round-trips. */
-export const READ_CHUNK_SIZE = 8 * 1024 * 1024;
+export const READ_CHUNK_SIZE = 16 * 1024 * 1024;
+/** Smaller reads during active extraction — less synchronous base64 decode per tick. */
+export const READ_CHUNK_SIZE_FAST = 2 * 1024 * 1024;
+/** Yield every N bytes during extraction so the tablet stays responsive. */
+export const YIELD_INTERVAL_FAST = 2 * 1024 * 1024;
+export const YIELD_INTERVAL_NORMAL = 4 * 1024 * 1024;
 
 let sharedWriteQueue = null;
+let extractionFastMode = false;
 
-export function getSharedWriteQueue(concurrency = MAX_WRITE_CONCURRENCY) {
+export function setExtractionFastMode(enabled) {
+  extractionFastMode = !!enabled;
+  sharedWriteQueue = createWriteQueue(
+    extractionFastMode ? 3 : MAX_WRITE_CONCURRENCY,
+  );
+}
+
+export function getReadChunkSize(fastMode = extractionFastMode) {
+  return fastMode ? READ_CHUNK_SIZE_FAST : READ_CHUNK_SIZE;
+}
+
+export function getSharedWriteQueue(concurrency = extractionFastMode ? 3 : MAX_WRITE_CONCURRENCY) {
   if (!sharedWriteQueue) {
     sharedWriteQueue = createWriteQueue(concurrency);
   }
@@ -81,10 +98,18 @@ function mergeParts(parts) {
   return combined;
 }
 
-export async function ensureZipDirectory(destDir, name) {
+export { mergeParts };
+
+export function createDirCache() {
+  return new Set();
+}
+
+export async function ensureZipDirectory(destDir, name, dirCache = null) {
   const normalized = normalizeZipEntryName(name).replace(/\/$/, '');
   if (!normalized || isZipFileEntry(normalized)) return;
   const fullPath = `${destDir}${normalized}/`;
+  if (dirCache?.has(fullPath)) return;
+  dirCache?.add(fullPath);
   await FileSystem.makeDirectoryAsync(fullPath, { intermediates: true });
 }
 
@@ -131,7 +156,8 @@ export async function writeZipEntry(destDir, name, bytes, {
 
   const slash = fullPath.lastIndexOf('/');
   if (slash > destDir.length - 1) {
-    await FileSystem.makeDirectoryAsync(fullPath.substring(0, slash), { intermediates: true });
+    const parentDir = fullPath.substring(0, slash + 1);
+    await FileSystem.makeDirectoryAsync(parentDir, { intermediates: true });
   }
 
   onWrite?.({ name: normalized, size: totalLen });
@@ -152,6 +178,8 @@ export function createStreamingUnzipSession(destDir, {
   onProgress,
   formatBytes = (n) => `${n} B`,
   log,
+  fastMode = true,
+  dirCache = createDirCache(),
 } = {}) {
   const unzip = new Unzip();
   unzip.register(UnzipInflate);
@@ -171,7 +199,7 @@ export function createStreamingUnzipSession(destDir, {
     }
 
     if (name.endsWith('/')) {
-      pendingWrites.push(enqueueWrite(() => ensureZipDirectory(destDir, name)));
+      pendingWrites.push(enqueueWrite(() => ensureZipDirectory(destDir, name, dirCache)));
       return;
     }
 
@@ -184,13 +212,14 @@ export function createStreamingUnzipSession(destDir, {
           control?.checkAborted?.();
           const bytes = parts.length === 1 ? parts[0] : mergeParts(parts);
           if (bytes.length === 0 && !isZipFileEntry(name)) {
-            await ensureZipDirectory(destDir, name);
+            await ensureZipDirectory(destDir, name, dirCache);
             return;
           }
           if (bytes.length === 0) return;
 
           extractedCount += 1;
-          if (extractedCount % 4 === 0) {
+          const progressEvery = fastMode ? 2 : 8;
+          if (extractedCount % progressEvery === 0) {
             onProgress?.('extracting', { extractedCount });
             await yieldToEventLoop();
           }
@@ -230,6 +259,7 @@ export async function streamUnzipFromFile(filePath, destDir, {
   log,
   progressStart = 0.55,
   progressSpan = 0.38,
+  fastMode = true,
 } = {}) {
   const zipInfo = await FileSystem.getInfoAsync(filePath, { size: true });
   const totalSize = zipInfo.size || 0;
@@ -241,6 +271,7 @@ export async function streamUnzipFromFile(filePath, destDir, {
     onFileExtracted,
     formatBytes,
     log,
+    fastMode,
     onProgress: (status, extra) => {
       report?.(phase.progress, status, { totalBytes: totalSize, ...extra });
     },
@@ -248,10 +279,12 @@ export async function streamUnzipFromFile(filePath, destDir, {
 
   let position = 0;
   let lastYieldAt = 0;
+  const readChunkSize = getReadChunkSize(fastMode);
+  const yieldInterval = fastMode ? READ_CHUNK_SIZE_FAST : YIELD_INTERVAL_NORMAL;
 
   while (position < totalSize) {
     control?.checkAborted?.();
-    const length = Math.min(READ_CHUNK_SIZE, totalSize - position);
+    const length = Math.min(readChunkSize, totalSize - position);
     const b64 = await FileSystem.readAsStringAsync(filePath, {
       encoding: FileSystem.EncodingType.Base64,
       position,
@@ -268,7 +301,7 @@ export async function streamUnzipFromFile(filePath, destDir, {
       { bytesWritten: position, totalBytes: totalSize },
     );
 
-    if (position - lastYieldAt >= READ_CHUNK_SIZE) {
+    if (fastMode || position - lastYieldAt >= yieldInterval) {
       lastYieldAt = position;
       await yieldToEventLoop();
     }

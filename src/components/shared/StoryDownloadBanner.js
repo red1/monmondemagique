@@ -18,7 +18,7 @@ export default function StoryDownloadBanner() {
   const { language } = useLanguage();
   const t = getStrings(language);
 
-  const hiddenOnScreen = pathname === '/story_packages' || pathname === '/story_player';
+  const hiddenOnScreen = pathname === '/story_packages' || pathname === '/story_player' || pathname === '/video_player';
 
   const summary = useMemo(() => {
     const entries = Object.entries(downloadProgress);
