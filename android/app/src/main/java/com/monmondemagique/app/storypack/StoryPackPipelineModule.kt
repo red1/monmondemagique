@@ -8,11 +8,11 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.concurrent.Executors
 import java.util.zip.ZipInputStream
 
@@ -21,7 +21,6 @@ class StoryPackPipelineModule(
 ) : ReactContextBaseJavaModule(reactContext) {
 
   private val executor = Executors.newSingleThreadExecutor()
-  private val http = OkHttpClient.Builder().build()
 
   override fun getName(): String = "StoryPackPipeline"
 
@@ -153,11 +152,17 @@ class StoryPackPipelineModule(
 
   private fun downloadToFile(url: String, dest: File, totalBytes: Long, packId: String) {
     dest.parentFile?.mkdirs()
-    val request = Request.Builder().url(url).get().build()
-    http.newCall(request).execute().use { response ->
-      if (!response.isSuccessful) throw IllegalStateException("HTTP ${response.code}")
-      val body = response.body ?: throw IllegalStateException("Empty response body")
-      val input = body.byteStream()
+    val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+      requestMethod = "GET"
+      connectTimeout = 30_000
+      readTimeout = 60_000
+      instanceFollowRedirects = true
+    }
+
+    try {
+      val code = connection.responseCode
+      if (code >= 400) throw IllegalStateException("HTTP $code")
+      val input = BufferedInputStream(connection.inputStream)
       dest.outputStream().use { output ->
         val buffer = ByteArray(1024 * 1024)
         var written = 0L
@@ -165,11 +170,18 @@ class StoryPackPipelineModule(
         while (input.read(buffer).also { read = it } != -1) {
           output.write(buffer, 0, read)
           written += read
-          val total = if (totalBytes > 0) totalBytes else body.contentLength().coerceAtLeast(written)
+          val headerLength = connection.contentLengthLong
+          val total = when {
+            totalBytes > 0 -> totalBytes
+            headerLength > 0 -> headerLength
+            else -> written
+          }
           val progress = 0.05 + (written.toDouble() / total.coerceAtLeast(1L)) * 0.5
           emitProgress(packId, progress, "downloading", total, written)
         }
       }
+    } finally {
+      connection.disconnect()
     }
   }
 
