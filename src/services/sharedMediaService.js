@@ -157,8 +157,12 @@ async function makeVideoEntry({ uri, filename, size = 0, modifiedAt = Date.now()
   };
 }
 
-async function ingestFileUri(uri, filename, seenUris, mp3Stories, videos, meta = {}) {
-  if (!uri || seenUris.has(uri)) return;
+function makeDedupeKey(filename) {
+  return (filename || '').toLowerCase();
+}
+
+async function ingestFileUri(uri, filename, seenUris, seenKeys, mp3Stories, videos, meta = {}) {
+  if (!uri) return;
   const name = filename || basenameFromUri(uri);
   const lower = name.toLowerCase();
   if (!MP3_EXT.test(lower) && !VIDEO_EXT.test(lower)) return;
@@ -177,7 +181,12 @@ async function ingestFileUri(uri, filename, seenUris, mp3Stories, videos, meta =
     }
   }
 
+  const dedupeKey = makeDedupeKey(name);
+  if (seenKeys.has(dedupeKey)) return;
+  if (seenUris.has(uri)) return;
+
   seenUris.add(uri);
+  seenKeys.add(dedupeKey);
 
   if (MP3_EXT.test(lower)) {
     mp3Stories.push(makeMp3Story({ uri, filename: name, size, modifiedAt }));
@@ -189,7 +198,7 @@ async function ingestFileUri(uri, filename, seenUris, mp3Stories, videos, meta =
   }
 }
 
-async function scanDirectoryUri(dirUri, seenUris, mp3Stories, videos) {
+async function scanDirectoryUri(dirUri, seenUris, seenKeys, mp3Stories, videos) {
   let entries = [];
   try {
     const info = await FileSystem.getInfoAsync(dirUri);
@@ -201,14 +210,14 @@ async function scanDirectoryUri(dirUri, seenUris, mp3Stories, videos) {
 
   for (const entry of entries) {
     const uri = entry.startsWith('file://') ? entry : `${dirUri}${entry}`;
-    await ingestFileUri(uri, entry, seenUris, mp3Stories, videos);
+    await ingestFileUri(uri, entry, seenUris, seenKeys, mp3Stories, videos);
   }
 }
 
-async function scanAndroidPublicDownloads(seenUris, mp3Stories, videos) {
+async function scanAndroidPublicDownloads(seenUris, seenKeys, mp3Stories, videos) {
   if (Platform.OS !== 'android') return;
   for (const dir of ANDROID_PUBLIC_DOWNLOAD_DIRS) {
-    await scanDirectoryUri(dir, seenUris, mp3Stories, videos);
+    await scanDirectoryUri(dir, seenUris, seenKeys, mp3Stories, videos);
   }
 }
 
@@ -222,7 +231,7 @@ async function resolveAssetUri(asset) {
 }
 
 
-async function scanMediaLibraryDownloads(seenUris, mp3Stories, videos) {
+async function scanMediaLibraryDownloads(seenUris, seenKeys, mp3Stories, videos) {
   const permission = await requestDownloadsAccess();
   if (!permission.granted && permission.accessPrivileges !== 'limited') {
     return false;
@@ -244,7 +253,7 @@ async function scanMediaLibraryDownloads(seenUris, mp3Stories, videos) {
       for (const asset of page.assets) {
         const uri = await resolveAssetUri(asset);
         const filename = asset.filename || basenameFromUri(uri);
-        await ingestFileUri(uri, filename, seenUris, mp3Stories, videos, {
+        await ingestFileUri(uri, filename, seenUris, seenKeys, mp3Stories, videos, {
           modifiedAt: (asset.modificationTime || asset.creationTime || Date.now() / 1000) * 1000,
         });
       }
@@ -273,7 +282,7 @@ async function scanMediaLibraryDownloads(seenUris, mp3Stories, videos) {
       const uri = await resolveAssetUri(asset);
       if (!isInDownloadsPath(uri)) continue;
       const filename = asset.filename || basenameFromUri(uri);
-      await ingestFileUri(uri, filename, seenUris, mp3Stories, videos, {
+      await ingestFileUri(uri, filename, seenUris, seenKeys, mp3Stories, videos, {
         modifiedAt: (asset.modificationTime || asset.creationTime || Date.now() / 1000) * 1000,
       });
     }
@@ -291,11 +300,12 @@ export async function scanDownloadsFolder({ force = false } = {}) {
   }
 
   const seenUris = new Set();
+  const seenKeys = new Set();
   const mp3Stories = [];
   const videos = [];
 
-  await scanAndroidPublicDownloads(seenUris, mp3Stories, videos);
-  const hasMediaAccess = await scanMediaLibraryDownloads(seenUris, mp3Stories, videos);
+  await scanAndroidPublicDownloads(seenUris, seenKeys, mp3Stories, videos);
+  const hasMediaAccess = await scanMediaLibraryDownloads(seenUris, seenKeys, mp3Stories, videos);
 
   mp3Stories.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
   videos.sort((a, b) => (a.title || '').localeCompare(b.title || ''));

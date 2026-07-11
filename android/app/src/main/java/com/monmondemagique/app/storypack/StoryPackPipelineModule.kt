@@ -29,6 +29,18 @@ class StoryPackPipelineModule(
     promise.resolve(true)
   }
 
+  /** Required for NativeEventEmitter on Android. */
+  @ReactMethod
+  fun addListener(eventName: String) {
+    // Keep: Required for RN built-in EventEmitter calls.
+  }
+
+  /** Required for NativeEventEmitter on Android. */
+  @ReactMethod
+  fun removeListeners(count: Int) {
+    // Keep: Required for RN built-in EventEmitter calls.
+  }
+
   @ReactMethod
   fun downloadDecryptAndUnzip(options: ReadableMap, promise: Promise) {
     val downloadUrl = options.getString("downloadUrl")

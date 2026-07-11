@@ -493,25 +493,55 @@ export default function VideoPlayerScreen() {
     </>
   );
 
-  if (isFullscreen) {
-    return (
-      <View style={styles.fullscreenContainer}>
-        <StatusBar hidden />
+  return (
+    <View style={isFullscreen ? styles.fullscreenContainer : styles.container}>
+      <StatusBar hidden={isFullscreen} />
+      {!isFullscreen && <AnimatedBackground />}
+
+      {!isFullscreen && (
+        <View style={[styles.playerHeader, { paddingTop: insets.top + 12 }]}>
+          <TouchableOpacity onPress={handleBack} style={styles.backBtn}>
+            <Ionicons name="arrow-back" size={28} color="white" />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle} numberOfLines={1}>
+            {currentVideo?.title || t.videosGame}
+          </Text>
+          <Text style={styles.trackInfo}>
+            {videoIndex + 1}/{playlist.length || 0}
+          </Text>
+        </View>
+      )}
+
+      <View
+        style={
+          isFullscreen
+            ? StyleSheet.absoluteFill
+            : [styles.videoFrame, { width: videoWidth, height: videoHeight }]
+        }
+      >
         <Video
           ref={videoRef}
-          style={StyleSheet.absoluteFill}
+          style={isFullscreen ? StyleSheet.absoluteFill : styles.video}
           resizeMode={ResizeMode.CONTAIN}
           useNativeControls={false}
           onPlaybackStatusUpdate={onPlaybackStatusUpdate}
         />
+        {activeSubtitle ? (
+          <View
+            style={[
+              isFullscreen ? styles.subtitleOverlayFullscreen : styles.subtitleOverlay,
+              isFullscreen && { bottom: Math.max(insets.bottom, 24) + 120 },
+            ]}
+          >
+            <Text style={isFullscreen ? styles.subtitleTextFullscreen : styles.subtitleText}>
+              {activeSubtitle}
+            </Text>
+          </View>
+        ) : null}
+      </View>
 
+      {isFullscreen ? (
         <View style={StyleSheet.absoluteFill} {...fullscreenPanResponder.panHandlers} pointerEvents="box-only">
-          {activeSubtitle ? (
-            <View style={[styles.subtitleOverlayFullscreen, { bottom: Math.max(insets.bottom, 24) + 120 }]}>
-              <Text style={styles.subtitleTextFullscreen}>{activeSubtitle}</Text>
-            </View>
-          ) : null}
-
           <Animated.View
             style={[styles.fsControlsLayer, { opacity: fsControlsOpacity }]}
             pointerEvents={fsControlsVisible ? 'box-none' : 'none'}
@@ -557,91 +587,59 @@ export default function VideoPlayerScreen() {
             </View>
           </Animated.View>
         </View>
-      </View>
-    );
-  }
+      ) : (
+        <>
+          <View style={styles.playerBody}>
+            <Text style={styles.playlistInfo}>
+              {t.videosProgress(videoIndex + 1, playlist.length)}
+            </Text>
+            {renderInlineControls()}
+          </View>
 
-  return (
-    <View style={styles.container}>
-      <AnimatedBackground />
-
-      <View style={[styles.playerHeader, { paddingTop: insets.top + 12 }]}>
-        <TouchableOpacity onPress={handleBack} style={styles.backBtn}>
-          <Ionicons name="arrow-back" size={28} color="white" />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle} numberOfLines={1}>
-          {currentVideo?.title || t.videosGame}
-        </Text>
-        <Text style={styles.trackInfo}>
-          {videoIndex + 1}/{playlist.length || 0}
-        </Text>
-      </View>
-
-      <View style={styles.playerBody}>
-        <View style={[styles.videoFrame, { width: videoWidth, height: videoHeight }]}>
-          <Video
-            ref={videoRef}
-            style={styles.video}
-            resizeMode={ResizeMode.CONTAIN}
-            useNativeControls={false}
-            onPlaybackStatusUpdate={onPlaybackStatusUpdate}
-          />
-          {activeSubtitle ? (
-            <View style={styles.subtitleOverlay}>
-              <Text style={styles.subtitleText}>{activeSubtitle}</Text>
-            </View>
-          ) : null}
-        </View>
-
-        <Text style={styles.playlistInfo}>
-          {t.videosProgress(videoIndex + 1, playlist.length)}
-        </Text>
-
-        {renderInlineControls()}
-      </View>
-
-      {playlist.length > 0 && (
-        <View style={[styles.playlistPanel, { paddingBottom: Math.max(insets.bottom, 8) }]}>
-          <Text style={styles.playlistPanelTitle}>{t.videosPlaylist}</Text>
-          <FlatList
-            data={playlist}
-            keyExtractor={(item) => item.videoId}
-            style={styles.playlistList}
-            renderItem={({ item, index }) => {
-              const active = index === videoIndex;
-              const isPast = index < videoIndex;
-              return (
-                <TouchableOpacity
-                  style={[styles.playlistItem, active && styles.playlistItemActive]}
-                  onPress={() => goToVideo(index)}
-                  activeOpacity={0.85}
-                >
-                  <View style={[styles.playlistIndex, active && styles.playlistIndexActive]}>
-                    {isPast ? (
-                      <Ionicons name="checkmark" size={16} color="#32CD32" />
-                    ) : (
-                      <Text style={[styles.playlistIndexText, active && styles.playlistIndexTextActive]}>
-                        {index + 1}
-                      </Text>
-                    )}
-                  </View>
-                  <Ionicons name="videocam" size={22} color={active ? TEAL : '#888'} />
-                  <View style={styles.playlistItemText}>
-                    <Text
-                      style={[styles.playlistItemTitle, active && styles.playlistItemTitleActive]}
-                      numberOfLines={2}
+          {playlist.length > 0 && (
+            <View style={[styles.playlistPanel, { paddingBottom: Math.max(insets.bottom, 8) }]}>
+              <Text style={styles.playlistPanelTitle}>{t.videosPlaylist}</Text>
+              <FlatList
+                data={playlist}
+                keyExtractor={(item) => item.videoId}
+                style={styles.playlistList}
+                renderItem={({ item, index }) => {
+                  const active = index === videoIndex;
+                  const isPast = index < videoIndex;
+                  return (
+                    <TouchableOpacity
+                      style={[styles.playlistItem, active && styles.playlistItemActive]}
+                      onPress={() => goToVideo(index)}
+                      activeOpacity={0.85}
                     >
-                      {item.title}
-                    </Text>
-                    {active && isPlaying && (
-                      <Text style={styles.playlistItemStatus}>{t.storiesNowPlaying}</Text>
-                    )}
-                  </View>
-                </TouchableOpacity>
-              );
-            }}
-          />
-        </View>
+                      <View style={[styles.playlistIndex, active && styles.playlistIndexActive]}>
+                        {isPast ? (
+                          <Ionicons name="checkmark" size={16} color="#32CD32" />
+                        ) : (
+                          <Text style={[styles.playlistIndexText, active && styles.playlistIndexTextActive]}>
+                            {index + 1}
+                          </Text>
+                        )}
+                      </View>
+                      <Ionicons name="videocam" size={22} color={active ? TEAL : '#888'} />
+                      <View style={styles.playlistItemText}>
+                        <Text
+                          style={[styles.playlistItemTitle, active && styles.playlistItemTitleActive]}
+                          numberOfLines={2}
+                        >
+                          {item.title}
+                        </Text>
+                        {active && isPlaying && (
+                          <Text style={styles.playlistItemStatus}>{t.storiesNowPlaying}</Text>
+                        )}
+                      </View>
+                    </TouchableOpacity>
+                  );
+                }}
+              />
+            </View>
+          )}
+        </>
       )}
 
       <WarningBanner

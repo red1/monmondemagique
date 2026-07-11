@@ -31,13 +31,11 @@ export function subscribeNativeProgress(packId, onProgress) {
 }
 
 function callNative(method, options) {
-  return new Promise((resolve, reject) => {
-    if (!StoryPackPipeline?.[method]) {
-      reject(new Error(`Native method unavailable: ${method}`));
-      return;
-    }
-    StoryPackPipeline[method](options, resolve, reject);
-  });
+  if (!StoryPackPipeline?.[method]) {
+    return Promise.reject(new Error(`Native method unavailable: ${method}`));
+  }
+  // Android/iOS @ReactMethod(..., promise) — do not pass resolve/reject manually.
+  return Promise.resolve(StoryPackPipeline[method](options));
 }
 
 export async function nativeDownloadDecryptAndUnzip({
