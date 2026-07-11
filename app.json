@@ -54,18 +54,6 @@
             "./assets/fonts/Fredoka-SemiBold.ttf"
           ]
         }
-      ],
-      [
-        "expo-audio",
-        {
-          "enableBackgroundPlayback": true
-        }
-      ],
-      [
-        "expo-video",
-        {
-          "supportsBackgroundPlayback": true
-        }
       ]
     ],
     "scheme": "mon-monde-magique",

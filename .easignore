@@ -1,0 +1,7 @@
+node_modules/
+.expo/
+web-build/
+web/
+assets/docs/screenshots/
+*.log
+.DS_Store
