@@ -20,6 +20,9 @@ import catalogData from '../../assets/stories/catalog.json';
 import {
   mergeSharedMp3IntoMetaAsync, notifySharedMediaUpdated, scanDownloadsFolder,
 } from './sharedMediaService';
+import { packLog, formatBytes } from '../utils/packLog';
+import { isTransientError, safeJsonParse, withRetry } from '../utils/resilience';
+import { enableDownloadKeepAwake, disableDownloadKeepAwake } from './downloadKeepAwake';
 
 if (typeof global.Buffer === 'undefined') {
   global.Buffer = Buffer;
@@ -158,7 +161,10 @@ export function getSourceById(sourceId) {
 
 export function beginActiveDownload() {
   activeDownloadCount += 1;
-  if (activeDownloadCount === 1) setExtractionFastMode(true);
+  if (activeDownloadCount === 1) {
+    setExtractionFastMode(true);
+    enableDownloadKeepAwake();
+  }
 }
 
 export function endActiveDownload() {
@@ -166,6 +172,7 @@ export function endActiveDownload() {
   if (activeDownloadCount === 0) {
     setExtractionFastMode(false);
     flushDeferredLibraryIndex().catch(() => {});
+    disableDownloadKeepAwake();
   }
 }
 
@@ -210,7 +217,7 @@ async function loadLibraryIndex() {
     const info = await FileSystem.getInfoAsync(LIBRARY_INDEX_PATH);
     if (!info.exists) return null;
     const raw = await FileSystem.readAsStringAsync(LIBRARY_INDEX_PATH);
-    const parsed = JSON.parse(raw);
+    const parsed = safeJsonParse(raw, null);
     return parsed?.stories && typeof parsed.stories === 'object' ? parsed.stories : null;
   } catch (_) {
     return null;
@@ -237,7 +244,7 @@ async function loadStoriesMeta({ force = false } = {}) {
   }
 
   const raw = await AsyncStorage.getItem(STORIES_META_KEY);
-  const meta = raw ? JSON.parse(raw) : {};
+  const meta = safeJsonParse(raw, {});
   if (Object.keys(meta).length > 0) await saveStoriesMeta(meta);
   else storiesMetaCache = meta;
   return meta;
@@ -267,7 +274,7 @@ async function flushDeferredLibraryIndex() {
 async function loadPackagesMeta() {
   if (packagesMetaCache) return packagesMetaCache;
   const raw = await AsyncStorage.getItem(PACKAGES_META_KEY);
-  packagesMetaCache = raw ? JSON.parse(raw) : {};
+  packagesMetaCache = safeJsonParse(raw, {});
   return packagesMetaCache;
 }
 
@@ -555,7 +562,7 @@ export async function getPackUsageCounts() {
   try {
     const raw = await AsyncStorage.getItem(PACK_USAGE_KEY);
     if (!raw) return {};
-    const parsed = JSON.parse(raw);
+    const parsed = safeJsonParse(raw, {});
     return parsed && typeof parsed === 'object' ? parsed : {};
   } catch (_) {
     return {};
@@ -799,7 +806,8 @@ async function migrateLegacyMeta() {
     if (!pack) continue;
 
     try {
-      const storyJson = JSON.parse(await FileSystem.readAsStringAsync(storyJsonPath));
+      const storyJson = safeJsonParse(await FileSystem.readAsStringAsync(storyJsonPath), null);
+      if (!storyJson) continue;
       const extracted = await extractPlayableStoriesFromPack(storyJson, entry.localPath, pack);
       if (!extracted.length) continue;
 
@@ -968,7 +976,8 @@ async function enrichStoriesMeta() {
     if (!jsonInfo.exists) continue;
 
     try {
-      const storyJson = JSON.parse(await FileSystem.readAsStringAsync(storyJsonPath));
+      const storyJson = safeJsonParse(await FileSystem.readAsStringAsync(storyJsonPath), null);
+      if (!storyJson) continue;
       const extracted = await extractPlayableStoriesFromPack(storyJson, localPath, pack, { fast: true });
       const extractedIds = new Set(extracted.map((item) => item.storyId));
 
@@ -1393,28 +1402,11 @@ async function extractPlayableStoriesFromPack(storyJson, packDir, pack, { fast =
 
 const MEGA_DOWNLOAD_TIMEOUT_MS = 25 * 60 * 1000;
 
-function packLog(step, detail) {
-  if (!__DEV__) return;
-  const time = new Date().toISOString().slice(11, 19);
-  if (detail !== undefined) {
-    console.log(`[StoryPack ${time}] ${step}`, detail);
-  } else {
-    console.log(`[StoryPack ${time}] ${step}`);
-  }
-}
-
-function formatBytes(n) {
-  if (n == null) return '?';
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-export { formatBytes };
+export { formatBytes } from '../utils/packLog';
 
 async function loadPackSizesCache() {
   const raw = await AsyncStorage.getItem(PACK_SIZES_KEY);
-  return raw ? JSON.parse(raw) : {};
+  return safeJsonParse(raw, {});
 }
 
 async function savePackSize(packId, sizeBytes) {
@@ -1539,10 +1531,16 @@ async function downloadFile(url, destPath, report, packId, control) {
     },
   );
   control?.setResumable?.(download);
-  const result = await download.downloadAsync();
+  const result = await withRetry(() => download.downloadAsync(), {
+    attempts: 2,
+    shouldRetry: isTransientError,
+  });
   control?.setResumable?.(null);
   control?.checkAborted?.();
-  packLog('HTTP download done', { packId, uri: result?.uri });
+  if (!result?.uri) {
+    throw new Error('Téléchargement HTTP échoué');
+  }
+  packLog('HTTP download done', { packId, uri: result.uri });
 }
 
 async function unzipToDirectory(zipPath, destDir, packId, report, control, onFileExtracted) {
@@ -1631,8 +1629,11 @@ async function assessPackDir(packDir, pack, { fast = false } = {}) {
 
   let storyJson;
   try {
-    storyJson = JSON.parse(await FileSystem.readAsStringAsync(storyJsonPath));
+    storyJson = safeJsonParse(await FileSystem.readAsStringAsync(storyJsonPath), null);
   } catch (_) {
+    storyJson = null;
+  }
+  if (!storyJson) {
     return {
       filesComplete: false,
       canExtract: false,
@@ -1884,7 +1885,10 @@ async function downloadPackageInternal(packId, onProgress, control) {
     }
 
     packLog('Parsing story.json…');
-    const storyJson = JSON.parse(await FileSystem.readAsStringAsync(storyJsonPath));
+    const storyJson = safeJsonParse(await FileSystem.readAsStringAsync(storyJsonPath), null);
+    if (!storyJson) {
+      throw new Error('story.json invalide ou corrompu');
+    }
     let extractedStories = await extractPlayableStoriesFromPack(storyJson, packDir, pack, { fast: true });
 
     if (extractedStories.length === 0 && preCheck.stories.length > 0) {
@@ -2032,7 +2036,7 @@ export async function savePlaybackProgress({
 
 export async function loadPlaybackProgress() {
   const raw = await AsyncStorage.getItem(PROGRESS_KEY);
-  return raw ? JSON.parse(raw) : null;
+  return safeJsonParse(raw, null);
 }
 
 export async function getValidPlaybackProgress() {
@@ -2129,7 +2133,7 @@ async function loadSavedPlaylistsRaw() {
   const raw = await AsyncStorage.getItem(SAVED_PLAYLISTS_KEY);
   if (!raw) return [];
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = safeJsonParse(raw, {});
     return Array.isArray(parsed) ? parsed : [];
   } catch (_) {
     return [];

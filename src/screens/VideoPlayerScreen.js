@@ -169,6 +169,14 @@ export default function VideoPlayerScreen() {
     }
     setPlaylist(items);
 
+    if (!items.length) {
+      Alert.alert(t.error, t.videosNoDownloaded, [
+        { text: 'OK', onPress: () => safeGoBack(router, '/videos') },
+      ]);
+      setReady(true);
+      return;
+    }
+
     if (params.fresh === '1') {
       await resetVideosPlayed();
     }
@@ -181,7 +189,7 @@ export default function VideoPlayerScreen() {
     setReady(true);
   }, [
     playlistIds, params.parental, params.fresh, params.startIndex,
-    isActive, session, getVideosRemaining, resetVideosPlayed,
+    isActive, session, getVideosRemaining, resetVideosPlayed, router, t,
   ]);
 
   useEffect(() => { loadPlaylist(); }, [loadPlaylist]);
@@ -285,14 +293,24 @@ export default function VideoPlayerScreen() {
         );
         await videoRef.current?.setVolumeAsync(volume);
         setIsPlaying(true);
-      } catch (_) { /* ignore */ }
+      } catch (err) {
+        if (sessionId !== playbackSessionRef.current) return;
+        Alert.alert(
+          t.error,
+          'Impossible de lire cette vidéo.',
+          [
+            { text: t.storiesNext, onPress: () => { handleVideoEnd(); } },
+            { text: 'Retour', style: 'cancel', onPress: () => safeGoBack(router, '/videos') },
+          ],
+        );
+      }
     })();
 
     return () => {
       playbackSessionRef.current += 1;
       deactivateKeepAwake('video-player');
     };
-  }, [ready, videoIndex, currentVideo?.uri]);
+  }, [ready, videoIndex, currentVideo?.uri, volume, handleVideoEnd, router, t]);
 
   const seekTo = useCallback(async (nextMs) => {
     if (!videoRef.current) return;

@@ -9,6 +9,7 @@ import {
 import { useSounds } from './SoundContext';
 import { useLanguage } from './LanguageContext';
 import { getStrings } from '../constants/Strings';
+import { isTransientError } from '../src/utils/resilience';
 
 const StoryDownloadProgressContext = createContext(null);
 const StoryDownloadActionsContext = createContext(null);
@@ -106,7 +107,14 @@ export function StoryDownloadProvider({ children }) {
           );
           return;
         }
-        Alert.alert(t.error, e.message || String(e));
+        const message = e.message || String(e);
+        Alert.alert(t.error, message, [
+          ...(isTransientError(e) ? [{
+            text: 'Réessayer',
+            onPress: () => startDownload(packId),
+          }] : []),
+          { text: 'OK', style: 'cancel' },
+        ]);
       })
       .finally(() => {
         countRef.current = Math.max(0, countRef.current - 1);

@@ -10,6 +10,7 @@ import { ParentalControlProvider } from '../contexts/ParentalControlContext';
 import { StoryDownloadProvider } from '../contexts/StoryDownloadContext';
 import ParentalLockOverlay from '../src/components/shared/ParentalLockOverlay';
 import StoryDownloadBanner from '../src/components/shared/StoryDownloadBanner';
+import AppErrorBoundary from '../src/components/shared/AppErrorBoundary';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -30,6 +31,7 @@ export default function Layout() {
   }
 
   return (
+    <AppErrorBoundary>
     <SafeAreaProvider>
     <LanguageProvider>
       <SoundProvider>
@@ -79,5 +81,6 @@ export default function Layout() {
       </SoundProvider>
     </LanguageProvider>
     </SafeAreaProvider>
+    </AppErrorBoundary>
   );
 }

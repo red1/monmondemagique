@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState, memo } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
   useWindowDimensions, ActivityIndicator, Alert, Platform,
@@ -13,14 +13,15 @@ import { useLanguage } from '../../contexts/LanguageContext';
 import { useParentalControl } from '../../contexts/ParentalControlContext';
 import { getStrings } from '../../constants/Strings';
 import {
-  getSharedVideos, subscribeSharedMedia, getSharedVideoIds,
+  subscribeSharedMedia, getSharedVideoIds,
   SYSTEM_DOWNLOADS_LABEL, requestDownloadsAccess,
+  scanDownloadsFolder, isSharedMediaCacheFresh,
 } from '../services/sharedMediaService';
 import { refreshSharedDownloads, isActiveDownloadInProgress } from '../services/storyService';
 
 const TEAL = '#00CED1';
 
-function VideoGridCard({ video, onPress, width }) {
+const VideoGridCard = memo(function VideoGridCard({ video, onPress, width }) {
   return (
     <TouchableOpacity
       style={[styles.card, { width }]}
@@ -38,7 +39,7 @@ function VideoGridCard({ video, onPress, width }) {
       <Text style={styles.cardTitle} numberOfLines={2}>{video.title}</Text>
     </TouchableOpacity>
   );
-}
+});
 
 export default function VideosScreen() {
   const router = useRouter();
@@ -61,37 +62,63 @@ export default function VideosScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [needsPermission, setNeedsPermission] = useState(false);
 
+  const loadInFlightRef = useRef(null);
+
   const parentalVideoLimit = isActive && session?.mode === 'stories'
     ? getVideosRemaining()
     : null;
 
-  const loadVideos = useCallback(async ({ showSpinner = false } = {}) => {
+  const loadVideos = useCallback(async ({ showSpinner = false, force = false } = {}) => {
+    if (loadInFlightRef.current) {
+      return loadInFlightRef.current;
+    }
+
     if (showSpinner) setRefreshing(true);
-    try {
-      const permission = await requestDownloadsAccess();
-      const allowed = permission.granted || permission.accessPrivileges === 'limited';
-      setNeedsPermission(!allowed);
-      if (!isActiveDownloadInProgress()) {
-        await refreshSharedDownloads();
+
+    const run = (async () => {
+      try {
+        const permission = await requestDownloadsAccess();
+        const allowed = permission.granted || permission.accessPrivileges === 'limited';
+        setNeedsPermission(!allowed);
+
+        let result;
+        if (force && !isActiveDownloadInProgress()) {
+          result = await refreshSharedDownloads();
+        } else {
+          result = await scanDownloadsFolder({ force: force && !isActiveDownloadInProgress() });
+        }
+        setVideos(result?.videos || []);
+      } catch (e) {
+        if (__DEV__) console.warn('[VideosScreen] load failed', e?.message || e);
+        setVideos([]);
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
       }
-      const list = await getSharedVideos({ force: !isActiveDownloadInProgress() });
-      setVideos(list);
-    } catch (_) {
-      setVideos([]);
+    })();
+
+    loadInFlightRef.current = run;
+    try {
+      await run;
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (loadInFlightRef.current === run) {
+        loadInFlightRef.current = null;
+      }
     }
   }, []);
 
   useEffect(() => {
-    loadVideos();
+    loadVideos({ force: false });
   }, [loadVideos]);
 
-  useEffect(() => subscribeSharedMedia(() => loadVideos()), [loadVideos]);
+  useEffect(() => subscribeSharedMedia(() => {
+    loadVideos({ force: true });
+  }), [loadVideos]);
 
   useFocusEffect(useCallback(() => {
-    loadVideos();
+    if (!isSharedMediaCacheFresh()) {
+      loadVideos({ force: false });
+    }
   }, [loadVideos]));
 
   const launchPlayer = useCallback(async (videoIds, { fresh = false } = {}) => {
@@ -127,7 +154,7 @@ export default function VideosScreen() {
   useEffect(() => {
     if (params.autoLaunch !== '1' || loading) return;
     (async () => {
-      const ids = await getSharedVideoIds({ force: true });
+      const ids = await getSharedVideoIds({ force: false });
       const limit = parentalVideoLimit ?? ids.length;
       const playlist = ids.slice(0, limit);
       if (playlist.length) launchPlayer(playlist, { fresh: true });
@@ -155,7 +182,7 @@ export default function VideosScreen() {
       <View style={styles.toolbar}>
         <TouchableOpacity
           style={styles.refreshBtn}
-          onPress={() => { playSound('pop'); loadVideos({ showSpinner: true }); }}
+          onPress={() => { playSound('pop'); loadVideos({ showSpinner: true, force: true }); }}
           disabled={refreshing}
         >
           {refreshing ? (
@@ -177,7 +204,7 @@ export default function VideosScreen() {
       {needsPermission ? (
         <TouchableOpacity
           style={styles.permissionBtn}
-          onPress={() => loadVideos({ showSpinner: true })}
+          onPress={() => loadVideos({ showSpinner: true, force: true })}
         >
           <Ionicons name="folder-open" size={18} color="white" />
           <Text style={styles.permissionBtnText}>{t.videosGrantAccess}</Text>
@@ -195,6 +222,9 @@ export default function VideosScreen() {
           key={numColumns}
           columnWrapperStyle={numColumns > 1 ? styles.row : undefined}
           contentContainerStyle={[styles.list, { paddingBottom: insets.bottom + 24 }]}
+          initialNumToRender={10}
+          windowSize={7}
+          removeClippedSubviews
           ListEmptyComponent={(
             <View style={styles.empty}>
               <Ionicons name="film-outline" size={48} color="#888" />

@@ -21,27 +21,21 @@ import {
   nativeDecryptAndUnzip,
   nativeDownloadDecryptAndUnzip,
 } from './nativeStoryPack';
+import { packLog, formatBytes } from '../utils/packLog';
+import {
+  createCircuitBreaker, isTransientError, safeJsonParse, withRetry,
+} from '../utils/resilience';
 
 /** Flush decrypted zip bytes to disk every N bytes during native decrypt phase. */
 const DECRYPT_FLUSH_BYTES = 4 * 1024 * 1024;
 const SLOW_PATH_YIELD_BYTES = 16 * 1024 * 1024;
 
-function packLog(step, detail) {
-  if (!__DEV__) return;
-  const time = new Date().toISOString().slice(11, 19);
-  if (detail !== undefined) {
-    console.log(`[StoryPack ${time}] ${step}`, detail);
-  } else {
-    console.log(`[StoryPack ${time}] ${step}`);
-  }
-}
+const megaCircuit = createCircuitBreaker('MEGA', {
+  failureThreshold: 3,
+  resetMs: 60_000,
+});
 
-function formatBytes(n) {
-  if (n == null) return '?';
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
+export { formatBytes };
 
 export function megaFileFromURL(url) {
   if (!File?.fromURL) {
@@ -51,9 +45,14 @@ export function megaFileFromURL(url) {
 }
 
 export async function fetchMegaFileSize(url) {
-  const file = megaFileFromURL(url);
-  await file.loadAttributes();
-  return file.size || null;
+  return megaCircuit.exec(() => withRetry(async () => {
+    const file = megaFileFromURL(url);
+    await file.loadAttributes();
+    return file.size || null;
+  }, {
+    attempts: 3,
+    shouldRetry: isTransientError,
+  }));
 }
 
 function buildDownloadRequest(file) {
@@ -374,14 +373,20 @@ export async function megaDownloadAndExtract(url, destDir, { report, packId, con
   const file = megaFileFromURL(url);
 
   try {
-    await file.loadAttributes();
+    await megaCircuit.exec(() => withRetry(() => file.loadAttributes(), {
+      attempts: 3,
+      shouldRetry: isTransientError,
+    }));
     packLog('MEGA attributes loaded', { name: file.name, size: formatBytes(file.size) });
   } catch (e) {
     packLog('MEGA loadAttributes failed', e.message);
   }
 
   packLog('MEGA requesting download URL…');
-  const response = await file.api.request(buildDownloadRequest(file));
+  const response = await megaCircuit.exec(() => withRetry(
+    () => file.api.request(buildDownloadRequest(file)),
+    { attempts: 3, shouldRetry: isTransientError },
+  ));
   control?.checkAborted?.();
 
   if (typeof response?.g !== 'string' || !response.g.startsWith('http')) {
@@ -407,7 +412,7 @@ export async function megaDownloadAndExtract(url, destDir, { report, packId, con
       FileSystem.getInfoAsync(encryptedPath, { size: true }),
       FileSystem.readAsStringAsync(encMetaPath).catch(() => null),
     ]);
-    const encMeta = encMetaRaw ? JSON.parse(encMetaRaw) : null;
+    const encMeta = safeJsonParse(encMetaRaw, null);
     if (encMeta?.size && encInfo.exists && encInfo.size === encMeta.size) {
       skipDownload = true;
       packLog('Reusing existing pack.enc', { path: encryptedPath, size: formatBytes(encInfo.size) });
@@ -470,7 +475,10 @@ export async function megaDownloadAndExtract(url, destDir, { report, packId, con
 
     control?.setResumable?.(download);
 
-    const result = await download.downloadAsync();
+    const result = await withRetry(() => download.downloadAsync(), {
+      attempts: 2,
+      shouldRetry: isTransientError,
+    });
     control?.setResumable?.(null);
     control?.checkAborted?.();
 

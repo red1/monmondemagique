@@ -27,7 +27,15 @@ const ANDROID_PUBLIC_DOWNLOAD_DIRS = [
 const mediaListeners = new Set();
 let videosCache = null;
 let videosCacheAt = 0;
-const CACHE_TTL_MS = 5000;
+const CACHE_TTL_MS = 30_000;
+
+export function isSharedMediaCacheFresh() {
+  return !!(videosCache && Date.now() - videosCacheAt < CACHE_TTL_MS);
+}
+
+export function getCachedSharedScan() {
+  return isSharedMediaCacheFresh() ? videosCache : null;
+}
 
 export function subscribeSharedMedia(listener) {
   mediaListeners.add(listener);
@@ -333,7 +341,14 @@ export async function getVideoById(videoId, { force = false } = {}) {
 
 export async function mergeSharedMp3IntoMetaAsync(meta = {}, { force = false, skipScan = false } = {}) {
   if (skipScan) return meta;
-  const sharedStories = await getSharedMp3Stories({ force });
+
+  let sharedStories;
+  if (!force && isSharedMediaCacheFresh()) {
+    sharedStories = videosCache.mp3Stories;
+  } else {
+    sharedStories = await getSharedMp3Stories({ force });
+  }
+
   const merged = { ...meta };
   Object.keys(merged).forEach((id) => {
     if (id.startsWith(`${SHARED_PACK_ID}::`)) delete merged[id];

@@ -1,5 +1,7 @@
 package com.monmondemagique.app.storypack
 
+import android.content.Context
+import android.os.PowerManager
 import android.util.Base64
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
@@ -21,8 +23,49 @@ class StoryPackPipelineModule(
 ) : ReactContextBaseJavaModule(reactContext) {
 
   private val executor = Executors.newSingleThreadExecutor()
+  private val wakeLockRefCount = java.util.concurrent.atomic.AtomicInteger(0)
+  @Volatile private var wakeLock: PowerManager.WakeLock? = null
 
   override fun getName(): String = "StoryPackPipeline"
+
+  @ReactMethod
+  fun acquireDownloadWakeLock(promise: Promise) {
+    acquireWakeLockInternal()
+    promise.resolve(true)
+  }
+
+  @ReactMethod
+  fun releaseDownloadWakeLock(promise: Promise) {
+    releaseWakeLockInternal()
+    promise.resolve(true)
+  }
+
+  private fun acquireWakeLockInternal() {
+    if (wakeLockRefCount.incrementAndGet() != 1) return
+    val pm = reactContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+    wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MonMondeMagique:StoryDownload").apply {
+      setReferenceCounted(false)
+      acquire(4 * 60 * 60 * 1000L)
+    }
+  }
+
+  private fun releaseWakeLockInternal() {
+    if (wakeLockRefCount.decrementAndGet() > 0) return
+    wakeLockRefCount.set(0)
+    wakeLock?.let { lock ->
+      if (lock.isHeld) lock.release()
+    }
+    wakeLock = null
+  }
+
+  private inline fun withDownloadWakeLock(block: () -> Unit) {
+    acquireWakeLockInternal()
+    try {
+      block()
+    } finally {
+      releaseWakeLockInternal()
+    }
+  }
 
   @ReactMethod
   fun isAvailable(promise: Promise) {
@@ -58,7 +101,8 @@ class StoryPackPipelineModule(
     }
 
     executor.execute {
-      try {
+      withDownloadWakeLock {
+        try {
         val dest = File(destDir)
         if (!dest.exists()) dest.mkdirs()
 
@@ -84,8 +128,9 @@ class StoryPackPipelineModule(
 
         emitProgress(packId, 1.0, "saving", totalBytes, totalBytes)
         promise.resolve(true)
-      } catch (e: Exception) {
-        promise.reject("NATIVE_PIPELINE_FAILED", e.message, e)
+        } catch (e: Exception) {
+          promise.reject("NATIVE_PIPELINE_FAILED", e.message, e)
+        }
       }
     }
   }
@@ -103,14 +148,16 @@ class StoryPackPipelineModule(
     }
 
     executor.execute {
-      try {
+      withDownloadWakeLock {
+        try {
         val key = Base64.decode(keyBase64, Base64.DEFAULT)
         emitProgress(packId, 0.58, "decrypting", 0L, 0L)
         MegaCtrDecryptor(key).decryptFile(File(encryptedPath), File(zipPath))
         emitProgress(packId, 0.86, "decrypting", 0L, 0L)
         promise.resolve(true)
-      } catch (e: Exception) {
-        promise.reject("NATIVE_DECRYPT_FAILED", e.message, e)
+        } catch (e: Exception) {
+          promise.reject("NATIVE_DECRYPT_FAILED", e.message, e)
+        }
       }
     }
   }
@@ -127,13 +174,15 @@ class StoryPackPipelineModule(
     }
 
     executor.execute {
-      try {
+      withDownloadWakeLock {
+        try {
         emitProgress(packId, 0.86, "unzipping", 0L, 0L)
         unzipToDirectory(File(zipPath), File(destDir), packId)
         emitProgress(packId, 0.98, "extracting", 0L, 0L)
         promise.resolve(true)
-      } catch (e: Exception) {
-        promise.reject("NATIVE_UNZIP_FAILED", e.message, e)
+        } catch (e: Exception) {
+          promise.reject("NATIVE_UNZIP_FAILED", e.message, e)
+        }
       }
     }
   }
@@ -151,13 +200,15 @@ class StoryPackPipelineModule(
     }
 
     executor.execute {
-      try {
+      withDownloadWakeLock {
+        try {
         emitProgress(packId, 0.05, "downloading", totalBytes, 0L)
         downloadToFile(downloadUrl, File(destPath), totalBytes, packId)
         emitProgress(packId, 0.55, "downloading", totalBytes, totalBytes)
         promise.resolve(true)
-      } catch (e: Exception) {
-        promise.reject("NATIVE_DOWNLOAD_FAILED", e.message, e)
+        } catch (e: Exception) {
+          promise.reject("NATIVE_DOWNLOAD_FAILED", e.message, e)
+        }
       }
     }
   }

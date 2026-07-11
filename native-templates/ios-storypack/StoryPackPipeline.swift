@@ -1,13 +1,47 @@
 import Foundation
+import UIKit
 
 @objc(StoryPackPipeline)
 class StoryPackPipeline: RCTEventEmitter {
   private let workQueue = DispatchQueue(label: "com.monmondemagique.storypack", qos: .userInitiated)
+  private var downloadWakeRefCount = 0
+  private var bgTaskId: UIBackgroundTaskIdentifier = .invalid
 
   override static func requiresMainQueueSetup() -> Bool { false }
 
   override func supportedEvents() -> [String]! {
     ["StoryPackNativeProgress"]
+  }
+
+  @objc func acquireDownloadWakeLock(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    DispatchQueue.main.async {
+      self.downloadWakeRefCount += 1
+      if self.downloadWakeRefCount == 1 {
+        UIApplication.shared.isIdleTimerDisabled = true
+        self.bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "StoryPackDownload") { }
+      }
+      resolve(true)
+    }
+  }
+
+  @objc func releaseDownloadWakeLock(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    DispatchQueue.main.async {
+      self.downloadWakeRefCount = max(0, self.downloadWakeRefCount - 1)
+      if self.downloadWakeRefCount == 0 {
+        UIApplication.shared.isIdleTimerDisabled = false
+        if self.bgTaskId != .invalid {
+          UIApplication.shared.endBackgroundTask(self.bgTaskId)
+          self.bgTaskId = .invalid
+        }
+      }
+      resolve(true)
+    }
   }
 
   @objc func isAvailable(

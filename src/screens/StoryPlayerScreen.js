@@ -170,6 +170,14 @@ export default function StoryPlayerScreen() {
     }
     setPlaylist(pl);
 
+    if (!pl.length) {
+      Alert.alert(t.error, t.storiesNoProgress, [
+        { text: 'OK', onPress: () => safeGoBack(router, '/stories') },
+      ]);
+      setReady(true);
+      return;
+    }
+
     let resumeProgress = progress;
     if (savedPlaylistId && shouldResume) {
       const savedProgress = await getSavedPlaylistProgress(savedPlaylistId);
@@ -202,7 +210,7 @@ export default function StoryPlayerScreen() {
       });
     }
     setReady(true);
-  }, [playlistIds, params.resume, params.fresh, params.startStoryIndex, params.parental, isActive, session, getStoriesRemaining, resetStoriesPlayed, savedPlaylistId]);
+  }, [playlistIds, params.resume, params.fresh, params.startStoryIndex, params.parental, isActive, session, getStoriesRemaining, resetStoriesPlayed, savedPlaylistId, router, t]);
 
   useEffect(() => { loadPlaylist(); }, [loadPlaylist]);
 
@@ -346,6 +354,15 @@ export default function StoryPlayerScreen() {
       );
       sound = created.sound;
     } catch (_) {
+      if (sessionId !== playbackSessionRef.current) return;
+      Alert.alert(
+        t.error,
+        'Impossible de lire ce fichier audio.',
+        [
+          { text: t.storiesNext, onPress: () => { handleTrackEnd(); } },
+          { text: 'Retour', style: 'cancel', onPress: () => safeGoBack(router, '/stories') },
+        ],
+      );
       return;
     }
 
@@ -359,7 +376,7 @@ export default function StoryPlayerScreen() {
       && initialStatus.durationMillis
       && initialStatus.durationMillis < MIN_PLAYABLE_DURATION_MS) {
       await sound.unloadAsync();
-      handleTrackEnd();
+      await handleTrackEnd();
       return;
     }
 
@@ -422,7 +439,7 @@ export default function StoryPlayerScreen() {
         handleTrackEnd();
       }
     });
-  }, [unloadSound, volume, computeTotalRemaining, computeCurrentStoryRemaining, handleTrackEnd, shouldWarnForStoryEnd, triggerWarning, persistProgress]);
+  }, [unloadSound, volume, computeTotalRemaining, computeCurrentStoryRemaining, handleTrackEnd, shouldWarnForStoryEnd, triggerWarning, persistProgress, router, t]);
 
   const applyVolume = useCallback(async (nextVolume) => {
     setVolume(nextVolume);

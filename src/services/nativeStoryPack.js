@@ -38,6 +38,31 @@ function callNative(method, options) {
   return Promise.resolve(StoryPackPipeline[method](options));
 }
 
+function callNativeVoid(method) {
+  if (!StoryPackPipeline?.[method]) {
+    return Promise.resolve(false);
+  }
+  return Promise.resolve(StoryPackPipeline[method]());
+}
+
+export async function acquireNativeDownloadWakeLock() {
+  try {
+    await callNativeVoid('acquireDownloadWakeLock');
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+export async function releaseNativeDownloadWakeLock() {
+  try {
+    await callNativeVoid('releaseDownloadWakeLock');
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 export async function nativeDownloadDecryptAndUnzip({
   downloadUrl,
   encryptedPath,
