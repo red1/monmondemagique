@@ -1,5 +1,5 @@
 import { Stack } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useFonts } from 'expo-font';
 import * as SplashScreen from 'expo-splash-screen';
 import { Platform, View } from 'react-native';
@@ -17,17 +17,7 @@ export default function Layout() {
   const [fontsLoaded] = useFonts({
     'Fredoka-SemiBold': require('../assets/fonts/Fredoka-SemiBold.ttf'),
   });
-  const [skiaReady, setSkiaReady] = useState(Platform.OS !== 'web');
-
-  useEffect(() => {
-    if (Platform.OS !== 'web') return;
-    let cancelled = false;
-    import('@shopify/react-native-skia/lib/module/web/LoadSkiaWeb')
-      .then(({ LoadSkiaWeb }) => LoadSkiaWeb())
-      .then(() => { if (!cancelled) setSkiaReady(true); })
-      .catch((e) => console.warn('[SkiaWeb] init failed:', e.message));
-    return () => { cancelled = true; };
-  }, []);
+  const [skiaReady] = useState(Platform.OS !== 'web');
 
   const onLayoutRootView = useCallback(async () => {
     if (fontsLoaded && skiaReady) {

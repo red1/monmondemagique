@@ -11,6 +11,13 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
   if (moduleName === 'megajs') {
     return { filePath: megajsBrowserPath, type: 'sourceFile' };
   }
+  if (platform !== 'web' && (
+    moduleName === 'canvaskit-wasm'
+    || moduleName.startsWith('canvaskit-wasm/')
+    || moduleName.includes('LoadSkiaWeb')
+  )) {
+    return { type: 'empty' };
+  }
   if (defaultResolveRequest) {
     return defaultResolveRequest(context, moduleName, platform);
   }
