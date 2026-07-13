@@ -1,5 +1,5 @@
-import React, { memo } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import React, { memo, useRef } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import StoryCoverImage from '../shared/StoryCoverImage';
 import { formatStoryDurationLabel } from '../../services/storyService';
@@ -19,19 +19,33 @@ function StoryGridCard({
   t,
 }) {
   const durationLabel = formatStoryDurationLabel(item);
+  const longPressHandledRef = useRef(false);
+
+  const handlePress = () => {
+    if (longPressHandledRef.current) {
+      longPressHandledRef.current = false;
+      return;
+    }
+    onPress?.();
+  };
+
+  const handleLongPress = () => {
+    longPressHandledRef.current = true;
+    onLongPress?.();
+  };
 
   return (
-    <TouchableOpacity
-      style={[
+    <Pressable
+      style={({ pressed }) => [
         styles.storyCard,
         isQueued && styles.storyCardQueued,
         willPlay && styles.storyCardWillPlay,
-        { width },
+        { width, opacity: pressed ? 0.85 : 1 },
       ]}
-      onPress={onPress}
-      onLongPress={onLongPress}
+      onPressIn={() => { longPressHandledRef.current = false; }}
+      onPress={handlePress}
+      onLongPress={handleLongPress}
       delayLongPress={400}
-      activeOpacity={0.85}
     >
       {onInfoPress ? (
         <TouchableOpacity
@@ -74,7 +88,7 @@ function StoryGridCard({
       {item.packTitle ? (
         <Text style={styles.packSubtitle} numberOfLines={1}>{item.packTitle}</Text>
       ) : null}
-    </TouchableOpacity>
+    </Pressable>
   );
 }
 
@@ -88,6 +102,7 @@ export default memo(StoryGridCard, (prev, next) => (
   && prev.willPlay === next.willPlay
   && prev.displayThumbnail === next.displayThumbnail
   && prev.width === next.width
+  && prev.onPress === next.onPress
   && prev.onLongPress === next.onLongPress
   && prev.onInfoPress === next.onInfoPress
 ));

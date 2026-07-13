@@ -3,7 +3,7 @@ import React, {
 } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Modal, BackHandler, FlatList,
-  Alert, useWindowDimensions, StatusBar, PanResponder, Animated,
+  Alert, useWindowDimensions, StatusBar, PanResponder, Animated, Pressable,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Video, ResizeMode } from 'expo-av';
@@ -21,7 +21,7 @@ import { useSounds } from '../../contexts/SoundContext';
 import { useLanguage } from '../../contexts/LanguageContext';
 import { useParentalControl } from '../../contexts/ParentalControlContext';
 import { getStrings } from '../../constants/Strings';
-import { getVideoById } from '../services/sharedMediaService';
+import { getSharedVideos } from '../services/sharedMediaService';
 import { getActiveSubtitle } from '../utils/subtitles';
 import { safeGoBack } from '../utils/safeNavigation';
 
@@ -81,6 +81,9 @@ export default function VideoPlayerScreen() {
   const lastPlaybackUiRef = useRef(0);
   const volumeStartRef = useRef(DEFAULT_VOLUME);
   const fsGestureMovedRef = useRef(false);
+  const parentalRef = useRef({ isActive, session, getVideosRemaining });
+  parentalRef.current = { isActive, session, getVideosRemaining };
+  const playlistLoadKeyRef = useRef(null);
 
   const clampVolume = useCallback((value) => Math.min(1, Math.max(0, value)), []);
 
@@ -118,10 +121,12 @@ export default function VideoPlayerScreen() {
   }, [fsControlsOpacity, hideFsControls]);
 
   const fullscreenPanResponder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => true,
+    onStartShouldSetPanResponder: () => !fsControlsVisible,
     onMoveShouldSetPanResponder: (_, gestureState) => (
-      Math.abs(gestureState.dy) > 8 || Math.abs(gestureState.dx) > 8
+      !fsControlsVisible
+      && (Math.abs(gestureState.dy) > 8 || Math.abs(gestureState.dx) > 8)
     ),
+    onPanResponderTerminationRequest: () => false,
     onPanResponderGrant: () => {
       fsGestureMovedRef.current = false;
       volumeStartRef.current = volume;
@@ -157,16 +162,15 @@ export default function VideoPlayerScreen() {
 
   const loadPlaylist = useCallback(async () => {
     let ids = [...playlistIds];
-    if (params.parental === '1' && isActive && session?.mode === 'stories') {
-      const limit = getVideosRemaining() ?? session.videoValue ?? session.value;
+    const { isActive: parentalActive, session: parentalSession, getVideosRemaining: getRemaining } = parentalRef.current;
+    if (params.parental === '1' && parentalActive && parentalSession?.mode === 'stories') {
+      const limit = getRemaining() ?? parentalSession.videoValue ?? parentalSession.value;
       ids = ids.slice(0, Math.max(limit, 0));
     }
 
-    const items = [];
-    for (const id of ids) {
-      const video = await getVideoById(id, { force: false });
-      if (video) items.push(video);
-    }
+    const allVideos = await getSharedVideos({ force: false });
+    const byId = new Map(allVideos.map((video) => [video.videoId, video]));
+    const items = ids.map((id) => byId.get(id)).filter(Boolean);
     setPlaylist(items);
 
     if (!items.length) {
@@ -187,12 +191,20 @@ export default function VideoPlayerScreen() {
     );
     setVideoIndex(start);
     setReady(true);
-  }, [
-    playlistIds, params.parental, params.fresh, params.startIndex,
-    isActive, session, getVideosRemaining, resetVideosPlayed, router, t,
-  ]);
+  }, [playlistIds, params.parental, params.fresh, params.startIndex, resetVideosPlayed, router, t]);
 
-  useEffect(() => { loadPlaylist(); }, [loadPlaylist]);
+  useEffect(() => {
+    const loadKey = [
+      params.playlist,
+      params.fresh,
+      params.startIndex,
+      params.parental,
+    ].join('|');
+    if (playlistLoadKeyRef.current === loadKey) return;
+    playlistLoadKeyRef.current = loadKey;
+    setReady(false);
+    loadPlaylist();
+  }, [loadPlaylist, params.playlist, params.fresh, params.startIndex, params.parental]);
 
   useEffect(() => {
     beginStoryPlaybackRef.current();
@@ -530,41 +542,48 @@ export default function VideoPlayerScreen() {
         </View>
       )}
 
-      <View
-        style={
-          isFullscreen
-            ? StyleSheet.absoluteFill
-            : [styles.videoFrame, { width: videoWidth, height: videoHeight }]
-        }
-      >
-        <Video
-          ref={videoRef}
-          style={isFullscreen ? StyleSheet.absoluteFill : styles.video}
-          resizeMode={ResizeMode.CONTAIN}
-          useNativeControls={false}
-          onPlaybackStatusUpdate={onPlaybackStatusUpdate}
-        />
-        {activeSubtitle ? (
-          <View
-            style={[
-              isFullscreen ? styles.subtitleOverlayFullscreen : styles.subtitleOverlay,
-              isFullscreen && { bottom: Math.max(insets.bottom, 24) + 120 },
-            ]}
-          >
-            <Text style={isFullscreen ? styles.subtitleTextFullscreen : styles.subtitleText}>
-              {activeSubtitle}
-            </Text>
-          </View>
-        ) : null}
+      <View style={isFullscreen ? StyleSheet.absoluteFill : styles.videoSection}>
+        <View
+          style={
+            isFullscreen
+              ? StyleSheet.absoluteFill
+              : [styles.videoFrame, { width: videoWidth, height: videoHeight }]
+          }
+        >
+          <Video
+            ref={videoRef}
+            style={isFullscreen ? StyleSheet.absoluteFill : styles.video}
+            resizeMode={ResizeMode.CONTAIN}
+            useNativeControls={false}
+            onPlaybackStatusUpdate={onPlaybackStatusUpdate}
+          />
+          {activeSubtitle ? (
+            <View
+              style={[
+                isFullscreen ? styles.subtitleOverlayFullscreen : styles.subtitleOverlay,
+                isFullscreen && { bottom: Math.max(insets.bottom, 24) + 120 },
+              ]}
+            >
+              <Text style={isFullscreen ? styles.subtitleTextFullscreen : styles.subtitleText}>
+                {activeSubtitle}
+              </Text>
+            </View>
+          ) : null}
+        </View>
       </View>
 
       {isFullscreen ? (
-        <View style={StyleSheet.absoluteFill} {...fullscreenPanResponder.panHandlers} pointerEvents="box-only">
+        <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
+          <View
+            style={StyleSheet.absoluteFill}
+            {...fullscreenPanResponder.panHandlers}
+            pointerEvents={fsControlsVisible ? 'none' : 'auto'}
+          />
           <Animated.View
             style={[styles.fsControlsLayer, { opacity: fsControlsOpacity }]}
             pointerEvents={fsControlsVisible ? 'box-none' : 'none'}
           >
-            <View style={[styles.fsTopBar, { paddingTop: insets.top + 8 }]} pointerEvents="box-none">
+            <View style={[styles.fsTopBar, { paddingTop: insets.top + 8 }]} pointerEvents="auto">
               <TouchableOpacity style={styles.fsIconBtn} onPress={exitFullscreen} activeOpacity={0.8}>
                 <Ionicons name="contract" size={22} color="white" />
               </TouchableOpacity>
@@ -581,7 +600,13 @@ export default function VideoPlayerScreen() {
               />
             </View>
 
-            <View style={[styles.fsBottomBar, { paddingBottom: Math.max(insets.bottom, 16) }]} pointerEvents="box-none">
+            <Pressable
+              style={styles.fsDismissArea}
+              onPress={hideFsControls}
+              pointerEvents={fsControlsVisible ? 'auto' : 'none'}
+            />
+
+            <View style={[styles.fsBottomBar, { paddingBottom: Math.max(insets.bottom, 16) }]} pointerEvents="auto">
               {renderPlaybackControls(TEAL, true)}
               <View style={styles.fsSecondaryRow}>
                 <TouchableOpacity
@@ -684,7 +709,9 @@ const styles = StyleSheet.create({
   fullscreenContainer: { flex: 1, backgroundColor: '#000' },
   fsControlsLayer: {
     ...StyleSheet.absoluteFillObject,
-    justifyContent: 'space-between',
+  },
+  fsDismissArea: {
+    flex: 1,
   },
   fsTopBar: {
     flexDirection: 'row',
@@ -765,6 +792,7 @@ const styles = StyleSheet.create({
   },
   trackInfo: { fontSize: 14, color: 'rgba(255,255,255,0.8)', fontFamily: 'Fredoka-SemiBold' },
   playerBody: { alignItems: 'center', paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12 },
+  videoSection: { width: '100%', alignItems: 'center', paddingTop: 8 },
   videoFrame: {
     borderRadius: 14, overflow: 'hidden', backgroundColor: '#000',
     borderWidth: 2, borderColor: TEAL,

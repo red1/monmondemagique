@@ -4,6 +4,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { setCachedStorageItem } from '../src/utils/asyncStorageCache';
 import SketchCanvas from '../components/SketchCanvas';
 import Strings from '../constants/Strings';
 import { Stack, useRouter, useLocalSearchParams } from 'expo-router';
@@ -135,6 +136,7 @@ export default function SketchScreen() {
            const drawings = existing ? JSON.parse(existing) : [];
            drawings.push({ id: Date.now().toString(), uri, title: 'Mon Chef d\'œuvre' });
            await AsyncStorage.setItem('USER_DRAWINGS', JSON.stringify(drawings));
+           setCachedStorageItem('USER_DRAWINGS', drawings);
        } catch (e) {
            console.log("Error saving to async storage", e);
        }

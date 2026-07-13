@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, FlatList, TouchableOpacity, Image, Dimensions, 
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getCachedStorageMulti, setCachedStorageItem } from '../src/utils/asyncStorageCache';
 import * as ImagePicker from 'expo-image-picker';
 import Header from '../src/components/shared/Header';
 import AnimatedBackground from '../src/components/shared/AnimatedBackground';
@@ -29,13 +30,11 @@ export default function PuzzleLibrary() {
     }, [])
   );
 
-  const loadData = async () => {
+  const loadData = async ({ force = false } = {}) => {
     try {
-      const saved = await AsyncStorage.getItem('USER_DRAWINGS');
-      setUserDrawings(saved ? JSON.parse(saved) : []);
-      
-      const puzzles = await AsyncStorage.getItem('SAVED_PUZZLES');
-      setSavedPuzzles(puzzles ? JSON.parse(puzzles) : []);
+      const data = await getCachedStorageMulti(['USER_DRAWINGS', 'SAVED_PUZZLES'], { force });
+      setUserDrawings(data.USER_DRAWINGS || []);
+      setSavedPuzzles(data.SAVED_PUZZLES || []);
     } catch (e) {
       console.error('Failed to load puzzle data', e);
       setUserDrawings([]);
@@ -114,6 +113,7 @@ export default function PuzzleLibrary() {
                 let puzzles = JSON.parse(existing);
                 puzzles = puzzles.filter(p => p.id !== id);
                 await AsyncStorage.setItem('SAVED_PUZZLES', JSON.stringify(puzzles));
+                setCachedStorageItem('SAVED_PUZZLES', puzzles);
                 setSavedPuzzles(puzzles);
                 playSound('trash');
               }

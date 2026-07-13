@@ -15,7 +15,7 @@ import { getStrings } from '../../constants/Strings';
 import {
   subscribeSharedMedia, getSharedVideoIds,
   SYSTEM_DOWNLOADS_LABEL, requestDownloadsAccess,
-  scanDownloadsFolder, isSharedMediaCacheFresh,
+  scanDownloadsFolder, isSharedMediaCacheFresh, getCachedSharedScan,
 } from '../services/sharedMediaService';
 import { refreshSharedDownloads, isActiveDownloadInProgress } from '../services/storyService';
 
@@ -63,6 +63,8 @@ export default function VideosScreen() {
   const [needsPermission, setNeedsPermission] = useState(false);
 
   const loadInFlightRef = useRef(null);
+  const launchingPlayerRef = useRef(false);
+  const autoLaunchDoneRef = useRef(false);
 
   const parentalVideoLimit = isActive && session?.mode === 'stories'
     ? getVideosRemaining()
@@ -108,14 +110,21 @@ export default function VideosScreen() {
   }, []);
 
   useEffect(() => {
+    const cached = getCachedSharedScan();
+    if (cached?.videos?.length) {
+      setVideos(cached.videos);
+      setLoading(false);
+    }
     loadVideos({ force: false });
   }, [loadVideos]);
 
   useEffect(() => subscribeSharedMedia(() => {
-    loadVideos({ force: true });
+    if (isSharedMediaCacheFresh()) return;
+    loadVideos({ force: false });
   }), [loadVideos]);
 
   useFocusEffect(useCallback(() => {
+    launchingPlayerRef.current = false;
     if (!isSharedMediaCacheFresh()) {
       loadVideos({ force: false });
     }
@@ -126,17 +135,23 @@ export default function VideosScreen() {
       Alert.alert(t.videosGame, t.videosNoDownloaded);
       return;
     }
-    if (fresh) await resetVideosPlayed();
-    playSound('pop');
-    router.push({
-      pathname: '/video_player',
-      params: {
-        playlist: JSON.stringify(videoIds),
-        startIndex: '0',
-        parental: '1',
-        ...(fresh ? { fresh: '1' } : {}),
-      },
-    });
+    if (launchingPlayerRef.current) return;
+    launchingPlayerRef.current = true;
+    try {
+      if (fresh) await resetVideosPlayed();
+      playSound('pop');
+      router.push({
+        pathname: '/video_player',
+        params: {
+          playlist: JSON.stringify(videoIds),
+          startIndex: '0',
+          parental: '1',
+          ...(fresh ? { fresh: '1' } : {}),
+        },
+      });
+    } finally {
+      setTimeout(() => { launchingPlayerRef.current = false; }, 1500);
+    }
   }, [playSound, resetVideosPlayed, router, t]);
 
   const handleVideoPress = useCallback((video) => {
@@ -152,7 +167,9 @@ export default function VideosScreen() {
   }, [videos, parentalVideoLimit, launchPlayer, t]);
 
   useEffect(() => {
+    if (autoLaunchDoneRef.current) return;
     if (params.autoLaunch !== '1' || loading) return;
+    autoLaunchDoneRef.current = true;
     (async () => {
       const ids = await getSharedVideoIds({ force: false });
       const limit = parentalVideoLimit ?? ids.length;

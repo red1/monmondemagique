@@ -1,14 +1,23 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, Image, Alert, Dimensions, Share } from 'react-native';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, Image, Alert, Dimensions, Share, ActivityIndicator, RefreshControl } from 'react-native';
 import { Stack, useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import {
+  getCachedStorageMulti, setCachedStorageItem, invalidateStorageCache,
+} from '../src/utils/asyncStorageCache';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system';
 import Header from '../src/components/shared/Header';
 import { useSounds } from '../contexts/SoundContext';
 import { useLanguage } from '../contexts/LanguageContext';
 import { getStrings } from '../constants/Strings';
+import {
+  subscribeSharedMedia, getCachedSharedScan, scanDownloadsFolder,
+  requestDownloadsAccess, isSharedMediaCacheFresh,
+} from '../src/services/sharedMediaService';
+import { refreshSharedDownloads, isActiveDownloadInProgress } from '../src/services/storyService';
+import { convertToSketch } from '../src/utils/imageFilters';
 
 const { width } = Dimensions.get('window');
 
@@ -34,23 +43,76 @@ export default function Library() {
   const [userDrawings, setUserDrawings] = useState([]);
   const [pinnedIds, setPinnedIds] = useState([]);
   const [hiddenIds, setHiddenIds] = useState([]);
+  const [downloadImages, setDownloadImages] = useState([]);
+  const [loadingDownloads, setLoadingDownloads] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [needsPermission, setNeedsPermission] = useState(false);
+
+  const loadDownloads = useCallback(async ({ force = false, showSpinner = false } = {}) => {
+    if (showSpinner) setRefreshing(true);
+    try {
+      const permission = await requestDownloadsAccess();
+      const allowed = permission.granted || permission.accessPrivileges === 'limited';
+      setNeedsPermission(!allowed);
+
+      let result;
+      if (force && !isActiveDownloadInProgress()) {
+        result = await refreshSharedDownloads();
+      } else {
+        result = await scanDownloadsFolder({ force: force && !isActiveDownloadInProgress() });
+      }
+
+      setDownloadImages((result?.images || []).map((img) => ({
+        id: img.imageId,
+        uri: img.uri,
+        title: img.title,
+        isDownload: true,
+      })));
+    } catch (e) {
+      setDownloadImages([]);
+    } finally {
+      setLoadingDownloads(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const cached = getCachedSharedScan();
+    if (cached?.images?.length) {
+      setDownloadImages(cached.images.map((img) => ({
+        id: img.imageId,
+        uri: img.uri,
+        title: img.title,
+        isDownload: true,
+      })));
+      setLoadingDownloads(false);
+    }
+    loadDownloads({ force: false });
+  }, [loadDownloads]);
+
+  useEffect(() => subscribeSharedMedia(() => {
+    if (isSharedMediaCacheFresh()) return;
+    loadDownloads({ force: false });
+  }), [loadDownloads]);
 
   useFocusEffect(
     React.useCallback(() => {
       loadData();
-    }, [])
+      if (!isSharedMediaCacheFresh()) {
+        loadDownloads({ force: false });
+      }
+    }, [loadDownloads])
   );
 
-  const loadData = async () => {
+  const loadData = async ({ force = false } = {}) => {
     try {
-      const saved = await AsyncStorage.getItem('USER_DRAWINGS');
-      if (saved) setUserDrawings(JSON.parse(saved));
-      
-      const pinned = await AsyncStorage.getItem('PINNED_IMAGES');
-      if (pinned) setPinnedIds(JSON.parse(pinned));
-
-      const hidden = await AsyncStorage.getItem('HIDDEN_IMAGES');
-      if (hidden) setHiddenIds(JSON.parse(hidden));
+      const data = await getCachedStorageMulti(
+        ['USER_DRAWINGS', 'PINNED_IMAGES', 'HIDDEN_IMAGES'],
+        { force },
+      );
+      setUserDrawings(data.USER_DRAWINGS || []);
+      setPinnedIds(data.PINNED_IMAGES || []);
+      setHiddenIds(data.HIDDEN_IMAGES || []);
     } catch (e) {
       console.error('Failed to load library data', e);
     }
@@ -66,6 +128,7 @@ export default function Library() {
 
     const list = [
       { id: 'blank', uri: 'blank', title: t.blankPage, isBlank: true },
+      ...downloadImages,
       ...userDrawings,
       ...local
     ].filter(img => !hiddenIds.includes(img.id));
@@ -79,10 +142,22 @@ export default function Library() {
       if (!aPinned && bPinned) return 1;
       return 0;
     });
-  }, [userDrawings, pinnedIds, hiddenIds, language]);
+  }, [userDrawings, pinnedIds, hiddenIds, downloadImages, language, t.blankPage]);
 
-  const handleSelect = (item) => {
+  const handleSelect = async (item) => {
     playSound('pop');
+    if (item.isDownload) {
+      try {
+        const sketchUri = await convertToSketch(item.uri);
+        router.push({
+          pathname: '/coloring',
+          params: { selectedImage: sketchUri },
+        });
+      } catch (error) {
+        Alert.alert(t.back === 'Retour' ? 'Erreur' : 'Error', t.coloringNoDownloadedImages);
+      }
+      return;
+    }
     router.push({
       pathname: '/coloring',
       params: { selectedImage: item.uri }
@@ -104,6 +179,7 @@ export default function Library() {
                 const updated = userDrawings.filter(d => d.id !== item.id);
                 setUserDrawings(updated);
                 await AsyncStorage.setItem('USER_DRAWINGS', JSON.stringify(updated));
+                setCachedStorageItem('USER_DRAWINGS', updated);
                 if (item.uri.startsWith('file://')) {
                     await FileSystem.deleteAsync(item.uri, { idempotent: true });
                 }
@@ -111,6 +187,7 @@ export default function Library() {
                 const updatedHidden = [...hiddenIds, item.id];
                 setHiddenIds(updatedHidden);
                 await AsyncStorage.setItem('HIDDEN_IMAGES', JSON.stringify(updatedHidden));
+                setCachedStorageItem('HIDDEN_IMAGES', updatedHidden);
             }
             playSound('success');
           }
@@ -143,6 +220,7 @@ export default function Library() {
     }
     setPinnedIds(updated);
     await AsyncStorage.setItem('PINNED_IMAGES', JSON.stringify(updated));
+    setCachedStorageItem('PINNED_IMAGES', updated);
   };
 
   const renderItem = ({ item }) => (
@@ -158,6 +236,7 @@ export default function Library() {
         
         {item.isNew && <View style={styles.badge}><Text style={styles.badgeText}>{t.nouveau}</Text></View>}
         {item.isUser && <View style={[styles.badge, {backgroundColor: '#FF69B4'}]}><Text style={styles.badgeText}>{t.moi}</Text></View>}
+        {item.isDownload && <View style={[styles.badge, {backgroundColor: '#1E90FF'}]}><Text style={styles.badgeText}>{t.coloringDownloadBadge}</Text></View>}
         
         <TouchableOpacity style={styles.pinBtn} onPress={() => togglePin(item)}>
           <Ionicons name={pinnedIds.includes(item.id) ? "pin" : "pin-outline"} size={20} color={pinnedIds.includes(item.id) ? "#FFD700" : "white"} />
@@ -184,13 +263,37 @@ export default function Library() {
 
   return (
     <View style={styles.container}>
-      <Header title={`✨ ${t.library}`} />
+      <Header
+        title={`✨ ${t.library}`}
+        rightComponent={(
+          <TouchableOpacity onPress={() => loadDownloads({ force: true, showSpinner: true })}>
+            <Ionicons name="refresh" size={26} color="white" />
+          </TouchableOpacity>
+        )}
+      />
+      {needsPermission && (
+        <TouchableOpacity style={styles.permissionBanner} onPress={() => loadDownloads({ force: true })}>
+          <Text style={styles.permissionText}>{t.videosGrantAccess}</Text>
+        </TouchableOpacity>
+      )}
+      {!loadingDownloads && downloadImages.length === 0 && !needsPermission && (
+        <Text style={styles.hintText}>{t.videosDownloadsHint}</Text>
+      )}
       <FlatList
         data={allImages}
         renderItem={renderItem}
         keyExtractor={item => item.id}
         numColumns={2}
         contentContainerStyle={styles.list}
+        refreshControl={(
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => loadDownloads({ force: true, showSpinner: true })}
+          />
+        )}
+        ListEmptyComponent={loadingDownloads ? (
+          <ActivityIndicator size="large" color="#FF69B4" style={{ marginTop: 40 }} />
+        ) : null}
       />
     </View>
   );
@@ -209,5 +312,14 @@ const styles = StyleSheet.create({
   cardFooter: { padding: 10 },
   cardTitle: { fontSize: 14, fontFamily: 'Fredoka-SemiBold', color: '#333', textTransform: 'capitalize', marginBottom: 5 },
   actions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10 },
-  actionBtn: { padding: 5, backgroundColor: '#f0f0f0', borderRadius: 8 }
+  actionBtn: { padding: 5, backgroundColor: '#f0f0f0', borderRadius: 8 },
+  permissionBanner: {
+    marginHorizontal: 12, marginTop: 8, padding: 12, backgroundColor: '#FFF3CD',
+    borderRadius: 12, borderWidth: 1, borderColor: '#FFE08A',
+  },
+  permissionText: { color: '#856404', fontFamily: 'Fredoka-SemiBold', textAlign: 'center' },
+  hintText: {
+    marginHorizontal: 16, marginTop: 8, marginBottom: 4, color: '#666',
+    fontFamily: 'Fredoka-Regular', textAlign: 'center', fontSize: 13,
+  },
 });

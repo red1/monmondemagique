@@ -92,6 +92,9 @@ export default function StoryPlayerScreen() {
   const progressFinalizedRef = useRef(false);
   const seekingRef = useRef(false);
   const exitProgressSavedRef = useRef(false);
+  const parentalRef = useRef({ isActive, session, getStoriesRemaining });
+  parentalRef.current = { isActive, session, getStoriesRemaining };
+  const playlistLoadKeyRef = useRef(null);
 
   const currentStory = playlist[storyIndex];
   const currentTrack = currentStory?.tracks?.[trackIndex];
@@ -164,8 +167,9 @@ export default function StoryPlayerScreen() {
       }
     }
 
-    if (params.parental === '1' && isActive && session?.mode === 'stories') {
-      const limit = getStoriesRemaining() ?? session.value;
+    const { isActive: parentalActive, session: parentalSession, getStoriesRemaining: getRemaining } = parentalRef.current;
+    if (params.parental === '1' && parentalActive && parentalSession?.mode === 'stories') {
+      const limit = getRemaining() ?? parentalSession.value;
       pl = pl.slice(0, Math.max(limit, 0));
     }
     setPlaylist(pl);
@@ -210,9 +214,21 @@ export default function StoryPlayerScreen() {
       });
     }
     setReady(true);
-  }, [playlistIds, params.resume, params.fresh, params.startStoryIndex, params.parental, isActive, session, getStoriesRemaining, resetStoriesPlayed, savedPlaylistId, router, t]);
+  }, [playlistIds, params.resume, params.fresh, params.startStoryIndex, params.parental, resetStoriesPlayed, savedPlaylistId, router, t]);
 
-  useEffect(() => { loadPlaylist(); }, [loadPlaylist]);
+  useEffect(() => {
+    const loadKey = [
+      params.playlist,
+      params.resume,
+      params.fresh,
+      params.startStoryIndex,
+      savedPlaylistId,
+    ].join('|');
+    if (playlistLoadKeyRef.current === loadKey) return;
+    playlistLoadKeyRef.current = loadKey;
+    setReady(false);
+    loadPlaylist();
+  }, [loadPlaylist, params.playlist, params.resume, params.fresh, params.startStoryIndex, savedPlaylistId]);
 
   const unloadSound = useCallback(async () => {
     const sound = soundRef.current;
@@ -529,6 +545,8 @@ export default function StoryPlayerScreen() {
   const goToStory = useCallback(async (index) => {
     if (index < 0 || index >= playlistRef.current.length) return;
     if (index === storyIndexRef.current) return;
+
+    playbackSessionRef.current += 1;
 
     let currentPos = lastSavedRef.current.pos || 0;
     if (soundRef.current) {

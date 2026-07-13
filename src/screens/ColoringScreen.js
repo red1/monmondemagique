@@ -1,5 +1,5 @@
 import React, { useState, useRef, useMemo, useCallback, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView, useWindowDimensions, Modal, PanResponder, Image as RNImage } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView, useWindowDimensions, Modal, Image as RNImage, FlatList, ActivityIndicator } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { GestureDetector, Gesture, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { useSharedValue, useAnimatedStyle, runOnJS } from 'react-native-reanimated';
@@ -8,6 +8,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { setCachedStorageItem } from '../utils/asyncStorageCache';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import SimpleColoringCanvas from '../components/coloring/SimpleColoringCanvas';
@@ -17,64 +18,160 @@ import { useLanguage } from '../../contexts/LanguageContext';
 import { getStrings } from '../../constants/Strings';
 import { convertToSketch } from '../utils/imageFilters';
 import { speak } from '../utils/speechService';
+import {
+  scanDownloadsFolder, requestDownloadsAccess, getCachedSharedScan,
+  isSharedMediaCacheFresh, subscribeSharedMedia,
+} from '../services/sharedMediaService';
+import { refreshSharedDownloads, isActiveDownloadInProgress } from '../services/storyService';
 
-const SpectrumPicker = ({ onColorSelect, label }) => {
+const hsvToHex = (h, s = 1, v = 1) => {
+  let r; let g; let b;
+  const i = Math.floor(h * 6);
+  const f = h * 6 - i;
+  const p = v * (1 - s);
+  const q = v * (1 - f * s);
+  const t = v * (1 - (1 - f) * s);
+  switch (i % 6) {
+    case 0: r = v; g = t; b = p; break;
+    case 1: r = q; g = v; b = p; break;
+    case 2: r = p; g = v; b = t; break;
+    case 3: r = p; g = q; b = v; break;
+    case 4: r = t; g = p; b = v; break;
+    case 5: r = v; g = p; b = q; break;
+    default: r = v; g = v; b = v;
+  }
+  const toHex = (x) => Math.round(x * 255).toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
+};
+
+const mixHex = (hex1, hex2, t) => {
+  const parse = (hex) => {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const [r1, g1, b1] = parse(hex1);
+  const [r2, g2, b2] = parse(hex2);
+  const r = Math.round(r1 + (r2 - r1) * t);
+  const g = Math.round(g1 + (g2 - g1) * t);
+  const b = Math.round(b1 + (b2 - b1) * t);
+  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`.toUpperCase();
+};
+
+const LIGHT_MIX = 0.94;
+
+/** Arc-en-ciel + dégradé sombre → vif → clair */
+const RainbowPicker = ({ onColorSelect, label, shadeLabel, previewLabel }) => {
   const { width } = useWindowDimensions();
   const [hue, setHue] = useState(0);
-  const spectrumWidth = width * 0.8;
+  const [shade, setShade] = useState(0.5);
+  const spectrumWidth = width * 0.85;
 
-  const hsvToHex = (h, s, v) => {
-    let r, g, b;
-    let i = Math.floor(h * 6);
-    let f = h * 6 - i;
-    let p = v * (1 - s);
-    let q = v * (1 - f * s);
-    let t = v * (1 - (1 - f) * s);
-    switch (i % 6) {
-      case 0: r = v, g = t, b = p; break;
-      case 1: r = q, g = v, b = p; break;
-      case 2: r = p, g = v, b = t; break;
-      case 3: r = p, g = q, b = v; break;
-      case 4: r = t, g = p, b = v; break;
-      case 5: r = v, g = p, b = q; break;
+  const shadeToColor = useCallback((h, shadePos) => {
+    if (shadePos <= 0.5) {
+      const t = shadePos / 0.5;
+      return hsvToHex(h, 1, 0.12 + t * 0.88);
     }
-    const toHex = x => Math.round(x * 255).toString(16).padStart(2, '0');
-    return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
-  };
+    const t = (shadePos - 0.5) / 0.5;
+    const vivid = hsvToHex(h, 1, 1);
+    return mixHex(vivid, '#FFFFFF', t * LIGHT_MIX);
+  }, []);
 
-  const panResponder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => true,
-    onMoveShouldSetPanResponder: () => true,
-    onPanResponderMove: (evt, gestureState) => {
-      const x = Math.max(0, Math.min(spectrumWidth, gestureState.moveX - (width - spectrumWidth) / 2));
-      const h = x / spectrumWidth;
-      setHue(h);
-      onColorSelect(hsvToHex(h, 1, 1));
-    },
-    onPanResponderRelease: (evt, gestureState) => {
-      const x = Math.max(0, Math.min(spectrumWidth, gestureState.moveX - (width - spectrumWidth) / 2));
-      const h = x / spectrumWidth;
-      setHue(h);
-      onColorSelect(hsvToHex(h, 1, 1));
-    }
-  }), [spectrumWidth]);
+  const currentHex = shadeToColor(hue, shade);
+
+  const shadeGradient = useMemo(() => {
+    const vivid = hsvToHex(hue, 1, 1);
+    return [
+      hsvToHex(hue, 1, 0.12),
+      vivid,
+      mixHex(vivid, '#FFFFFF', LIGHT_MIX),
+    ];
+  }, [hue]);
+
+  const emitColor = useCallback((h, s) => {
+    onColorSelect(shadeToColor(h, s));
+  }, [onColorSelect, shadeToColor]);
+
+  const pickHue = useCallback((locationX) => {
+    const x = Math.max(0, Math.min(spectrumWidth, locationX));
+    const h = x / spectrumWidth;
+    setHue(h);
+    emitColor(h, shade);
+  }, [spectrumWidth, shade, emitColor]);
+
+  const pickShade = useCallback((locationX) => {
+    const x = Math.max(0, Math.min(spectrumWidth, locationX));
+    const s = x / spectrumWidth;
+    setShade(s);
+    emitColor(hue, s);
+  }, [spectrumWidth, hue, emitColor]);
+
+  const makeBarResponder = useCallback((pick) => ({
+    onStartShouldSetResponder: () => true,
+    onMoveShouldSetResponder: () => true,
+    onResponderGrant: (evt) => pick(evt.nativeEvent.locationX),
+    onResponderMove: (evt) => pick(evt.nativeEvent.locationX),
+    onResponderRelease: (evt) => pick(evt.nativeEvent.locationX),
+  }), []);
+
+  const hueResponder = useMemo(() => makeBarResponder(pickHue), [makeBarResponder, pickHue]);
+  const shadeResponder = useMemo(() => makeBarResponder(pickShade), [makeBarResponder, pickShade]);
 
   return (
-    <View style={styles.spectrumContainer}>
+    <View style={styles.rainbowSection}>
       <Text style={styles.spectrumLabel}>{label}</Text>
-      <View style={[styles.spectrumBar, { width: spectrumWidth }]} {...panResponder.panHandlers}>
+      <View
+        style={[styles.spectrumBar, styles.spectrumBarLarge, { width: spectrumWidth }]}
+        {...hueResponder}
+      >
         <LinearGradient
           colors={['#ff0000', '#ffff00', '#00ff00', '#00ffff', '#0000ff', '#ff00ff', '#ff0000']}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 0 }}
           style={StyleSheet.absoluteFill}
+          pointerEvents="none"
         />
-        <View style={[styles.spectrumCursor, { left: hue * spectrumWidth - 10 }]} />
+        <View
+          pointerEvents="none"
+          style={[styles.spectrumCursor, styles.spectrumCursorLarge, { left: hue * spectrumWidth - 14 }]}
+        />
       </View>
-      <View style={[styles.colorPreview, { backgroundColor: hsvToHex(hue, 1, 1) }]} />
+
+      <Text style={styles.spectrumLabel}>{shadeLabel}</Text>
+      <View
+        style={[styles.spectrumBar, styles.shadeBar, { width: spectrumWidth }]}
+        {...shadeResponder}
+      >
+        <LinearGradient
+          colors={shadeGradient}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          style={StyleSheet.absoluteFill}
+          pointerEvents="none"
+        />
+        <View
+          pointerEvents="none"
+          style={[styles.spectrumCursor, styles.shadeCursor, { left: shade * spectrumWidth - 12 }]}
+        />
+      </View>
+      <View style={[styles.shadeHints, { width: spectrumWidth }]}>
+        <Text style={styles.shadeHintText}>🌑</Text>
+        <Text style={styles.shadeHintText}>🎨</Text>
+        <Text style={styles.shadeHintText}>☀️</Text>
+      </View>
+
+      <View style={styles.previewRow}>
+        <View style={[styles.colorPreviewLarge, { backgroundColor: currentHex }]} />
+        <Text style={styles.previewHint}>{previewLabel}</Text>
+      </View>
     </View>
   );
 };
+
+const KID_EXTRA_COLORS = [
+  '#FF69B4', '#FF0000', '#FF8C00', '#FFD700', '#ADFF2F', '#00FF00',
+  '#00CED1', '#1E90FF', '#0000FF', '#9370DB', '#FF00FF', '#FFFFFF',
+  '#C0C0C0', '#8B4513', '#000000', '#FFB6C1',
+];
 
 const ColoringScreen = () => {
   const { width, height } = useWindowDimensions();
@@ -99,9 +196,14 @@ const ColoringScreen = () => {
   const [tool, setTool] = useState('pen'); 
   const [shape, setShape] = useState('none');
   const [showImagePicker, setShowImagePicker] = useState(!params.selectedImage);
+  const [showDownloadsModal, setShowDownloadsModal] = useState(false);
+  const [downloadImages, setDownloadImages] = useState([]);
+  const [loadingDownloads, setLoadingDownloads] = useState(false);
+  const [needsDownloadPermission, setNeedsDownloadPermission] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [showGlitterPicker, setShowGlitterPicker] = useState(false);
-  
+  const [customColors, setCustomColors] = useState([]);
+  const canvasLayoutRef = useRef({ width: 0, height: 0 });
   const scale = useSharedValue(1);
   const translateX = useSharedValue(0);
   const translateY = useSharedValue(0);
@@ -114,12 +216,21 @@ const ColoringScreen = () => {
   const [lastInteraction, setLastInteraction] = useState({ x: width / 2, y: height * 0.3 });
 
   const updateZoomProps = useCallback(() => {
-    // Only update state if values are valid numbers to prevent crashes
     const nextScale = scale.value;
-    const nextTx = translateX.value;
-    const nextTy = translateY.value;
+    let nextTx = translateX.value;
+    let nextTy = translateY.value;
+    const { width: cw, height: ch } = canvasLayoutRef.current;
 
-    if (!isNaN(nextScale) && !isNaN(nextTx) && !isNaN(nextTy)) {
+    if (!Number.isNaN(nextScale) && cw && ch && nextScale > 1) {
+      nextTx = Math.min(0, Math.max(cw - cw * nextScale, nextTx));
+      nextTy = Math.min(0, Math.max(ch - ch * nextScale, nextTy));
+      translateX.value = nextTx;
+      translateY.value = nextTy;
+      savedTranslateX.value = nextTx;
+      savedTranslateY.value = nextTy;
+    }
+
+    if (!Number.isNaN(nextScale) && !Number.isNaN(nextTx) && !Number.isNaN(nextTy)) {
       setZoomScale(nextScale);
       setZoomOffset({ x: nextTx, y: nextTy });
     }
@@ -151,20 +262,19 @@ const ColoringScreen = () => {
       runOnJS(updateZoomProps)();
     });
 
-  const panGesture = Gesture.Pan()
-    .minPointers(2) // Désormais le déplacement nécessite 2 doigts pour ne pas gêner le dessin à 1 doigt
+  const panGesture = useMemo(() => Gesture.Pan()
+    .minPointers(tool === 'hand' ? 1 : 2)
+    .enabled(zoomScale > 1)
     .onUpdate((e) => {
-      if (scale.value > 1) {
-        translateX.value = savedTranslateX.value + e.translationX;
-        translateY.value = savedTranslateY.value + e.translationY;
-        runOnJS(syncZoomDuringGesture)();
-      }
+      translateX.value = savedTranslateX.value + e.translationX;
+      translateY.value = savedTranslateY.value + e.translationY;
+      runOnJS(syncZoomDuringGesture)();
     })
     .onEnd(() => {
       savedTranslateX.value = translateX.value;
       savedTranslateY.value = translateY.value;
       runOnJS(updateZoomProps)();
-    });
+    }), [tool, zoomScale, syncZoomDuringGesture, updateZoomProps]);
 
   const composedGesture = Gesture.Simultaneous(pinchGesture, panGesture);
 
@@ -253,14 +363,28 @@ const ColoringScreen = () => {
     '#32CD32', '#1E90FF', '#FF1493', '#FFFFFF', '#000000', '#8B4513',
   ];
 
-  const extendedColors = [
-    '#FF69B4', '#FFD700', '#FF6347', '#FF8C00', '#9370DB', '#00CED1',
-    '#32CD32', '#1E90FF', '#FF1493', '#FFFFFF', '#000000', '#8B4513',
-    '#E6E6FA', '#FFF0F5', '#F0FFF0', '#F0F8FF', '#FFFACD', '#FFE4E1',
-    '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#00FFFF', '#FF00FF',
-    '#C0C0C0', '#808080', '#800000', '#808000', '#008000', '#800080',
-    '#008080', '#000080', '#A52A2A', '#D2691E', '#CD853F', '#F4A460'
-  ];
+  const paletteColors = useMemo(() => {
+    const merged = [...colors];
+    customColors.forEach((c) => {
+      if (!merged.includes(c)) merged.push(c);
+    });
+    return merged;
+  }, [customColors]);
+
+  const applyColor = useCallback((color, { addToPalette = false, closePicker = false } = {}) => {
+    setCurrentColor(color);
+    if (tool === 'eraser') setTool('pen');
+    if (addToPalette) {
+      setCustomColors((prev) => {
+        if (prev.includes(color) || colors.includes(color)) return prev;
+        return [...prev, color].slice(-8);
+      });
+    }
+    if (closePicker) setShowColorPicker(false);
+    playSound('pop');
+  }, [tool, playSound, colors]);
+
+  const extendedColors = KID_EXTRA_COLORS;
 
   const sizes = [5, 10, 20, 40, 60];
   const shapes = [
@@ -302,6 +426,58 @@ const ColoringScreen = () => {
     }
   };
 
+  const loadDownloadImages = useCallback(async ({ force = false } = {}) => {
+    setLoadingDownloads(true);
+    try {
+      const permission = await requestDownloadsAccess();
+      const allowed = permission.granted || permission.accessPrivileges === 'limited';
+      setNeedsDownloadPermission(!allowed);
+
+      let result;
+      if (force && !isActiveDownloadInProgress()) {
+        result = await refreshSharedDownloads();
+      } else {
+        result = await scanDownloadsFolder({ force: force && !isActiveDownloadInProgress() });
+      }
+      setDownloadImages(result?.images || []);
+    } catch (error) {
+      setDownloadImages([]);
+    } finally {
+      setLoadingDownloads(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!showImagePicker) return undefined;
+    const cached = getCachedSharedScan();
+    if (cached?.images?.length) {
+      setDownloadImages(cached.images);
+    }
+    loadDownloadImages({ force: false });
+    return subscribeSharedMedia(() => {
+      if (isSharedMediaCacheFresh()) return;
+      loadDownloadImages({ force: false });
+    });
+  }, [showImagePicker, loadDownloadImages]);
+
+  const handleOpenDownloads = () => {
+    playSound('pop');
+    setShowDownloadsModal(true);
+    loadDownloadImages({ force: true });
+  };
+
+  const handleSelectDownloadImage = async (image) => {
+    try {
+      playSound('success');
+      const sketchUri = await convertToSketch(image.uri);
+      setImageUri(sketchUri);
+      setShowDownloadsModal(false);
+      setShowImagePicker(false);
+    } catch (error) {
+      Alert.alert(t.back === 'Retour' ? 'Erreur' : 'Error', t.coloringNoDownloadedImages);
+    }
+  };
+
   const handleSave = async () => {
     try {
       if (!canvasRef.current) return;
@@ -328,6 +504,7 @@ const ColoringScreen = () => {
         isUser: true 
       });
       await AsyncStorage.setItem('USER_DRAWINGS', JSON.stringify(drawings));
+      setCachedStorageItem('USER_DRAWINGS', drawings);
       playSound('win');
       Alert.alert('✨ ' + t.bravo, t.back === 'Retour' ? 'Ton dessin est sauvegardé ! 🎨' : 'Your drawing is saved! 🎨');
     } catch (error) {
@@ -355,12 +532,62 @@ const ColoringScreen = () => {
               <Ionicons name="images" size={40} color="white" />
               <Text style={styles.btnText}>{t.pickImage}</Text>
             </TouchableOpacity>
+            <TouchableOpacity style={[styles.pickerBtn, {backgroundColor: '#9370DB'}]} onPress={handleOpenDownloads}>
+              <Ionicons name="download" size={40} color="white" />
+              <Text style={styles.btnText}>{t.coloringFromDownloads}</Text>
+            </TouchableOpacity>
             <TouchableOpacity style={[styles.pickerBtn, {backgroundColor: '#32CD32'}]} onPress={() => {setImageUri('blank'); setShowImagePicker(false);}}>
               <Ionicons name="document-text" size={40} color="white" />
               <Text style={styles.btnText}>{t.blankPage}</Text>
             </TouchableOpacity>
           </View>
+          <Text style={styles.pickerHint}>{t.videosDownloadsHint}</Text>
         </LinearGradient>
+
+        <Modal visible={showDownloadsModal} animationType="slide" onRequestClose={() => setShowDownloadsModal(false)}>
+          <View style={styles.downloadsModal}>
+            <Header
+              title={`📥 ${t.coloringFromDownloads}`}
+              leftComponent={(
+                <TouchableOpacity onPress={() => setShowDownloadsModal(false)}>
+                  <Ionicons name="arrow-back" size={28} color="white" />
+                </TouchableOpacity>
+              )}
+              rightComponent={(
+                <TouchableOpacity onPress={() => loadDownloadImages({ force: true })}>
+                  <Ionicons name="refresh" size={26} color="white" />
+                </TouchableOpacity>
+              )}
+            />
+            {needsDownloadPermission && (
+              <TouchableOpacity style={styles.downloadPermissionBanner} onPress={() => loadDownloadImages({ force: true })}>
+                <Text style={styles.downloadPermissionText}>{t.videosGrantAccess}</Text>
+              </TouchableOpacity>
+            )}
+            {loadingDownloads ? (
+              <ActivityIndicator size="large" color="#FF69B4" style={{ marginTop: 40 }} />
+            ) : (
+              <FlatList
+                data={downloadImages}
+                keyExtractor={(item) => item.imageId}
+                numColumns={2}
+                contentContainerStyle={styles.downloadsList}
+                ListEmptyComponent={(
+                  <Text style={styles.downloadsEmpty}>{t.coloringNoDownloadedImages}</Text>
+                )}
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={styles.downloadCard}
+                    onPress={() => handleSelectDownloadImage(item)}
+                  >
+                    <RNImage source={{ uri: item.uri }} style={styles.downloadThumb} resizeMode="contain" />
+                    <Text style={styles.downloadTitle} numberOfLines={2}>{item.title}</Text>
+                  </TouchableOpacity>
+                )}
+              />
+            )}
+          </View>
+        </Modal>
       </View>
     );
   }
@@ -380,20 +607,38 @@ const ColoringScreen = () => {
         }/>
 
         <GestureDetector gesture={composedGesture}>
-          <View style={styles.canvasWrapper}>
-                        <SimpleColoringCanvas
-                          ref={canvasRef}
-                          imageUri={imageUri}
-                          currentColor={currentColor}
-                          tool={tool}
-                          strokeWidth={strokeWidth}
-                          shape={shape}
-                          isMagic={isMagic}
-                          glitterType={glitterType}
-                          zoomScale={zoomScale}
-                          zoomOffset={zoomOffset}
-                          onInteraction={handleInteraction}
-                        />
+          <View
+            style={styles.canvasWrapper}
+            onLayout={(e) => {
+              const { width: cw, height: ch } = e.nativeEvent.layout;
+              const prev = canvasLayoutRef.current;
+              canvasLayoutRef.current = { width: cw, height: ch };
+
+              if (prev.width && prev.height && (prev.width !== cw || prev.height !== ch)) {
+                const ratioX = cw / prev.width;
+                const ratioY = ch / prev.height;
+                translateX.value *= ratioX;
+                translateY.value *= ratioY;
+                savedTranslateX.value = translateX.value;
+                savedTranslateY.value = translateY.value;
+                updateZoomProps();
+              }
+            }}
+          >
+            <SimpleColoringCanvas
+              ref={canvasRef}
+              imageUri={imageUri}
+              currentColor={currentColor}
+              tool={tool}
+              strokeWidth={strokeWidth}
+              shape={shape}
+              isMagic={isMagic}
+              glitterType={glitterType}
+              zoomScale={zoomScale}
+              zoomOffset={zoomOffset}
+              onInteraction={handleInteraction}
+              drawingEnabled={tool !== 'hand'}
+            />
                         {/* Scroll Indicators */}
                         {zoomScale > 1 && (
                           <>
@@ -438,6 +683,13 @@ const ColoringScreen = () => {
               onPress={() => { setTool('eraser'); setShape('none'); playSound('pop'); }}
             >
               <MaterialCommunityIcons name="eraser" size={28} color={tool === 'eraser' ? 'white' : '#666'} />
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={[styles.toolBtn, tool === 'hand' && styles.toolBtnActive]} 
+              onPress={() => { setTool('hand'); setShape('none'); playSound('pop'); }}
+            >
+              <MaterialCommunityIcons name="hand-back-right" size={28} color={tool === 'hand' ? 'white' : '#666'} />
             </TouchableOpacity>
 
             <TouchableOpacity 
@@ -501,17 +753,20 @@ const ColoringScreen = () => {
         <View style={styles.paletteContainer}>
           <TouchableOpacity 
             style={[styles.colorBtn, styles.pickerTriggerBtn]} 
-            onPress={() => { setShowColorPicker(true); playSound('pop'); }}
+            onPress={() => {
+              setShowColorPicker(true);
+              playSound('pop');
+            }}
           >
               <Ionicons name="color-palette" size={24} color="#666" />
             </TouchableOpacity>
 
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.palette}>
-              {colors.map((c, i) => (
+              {paletteColors.map((c) => (
                 <TouchableOpacity
-                  key={i}
-                  style={[styles.colorBtn, {backgroundColor: c}, currentColor === c && styles.colorBtnActive]}
-                  onPress={() => { setCurrentColor(c); if(tool === 'eraser') setTool('pen'); playSound('pop'); }}
+                  key={c}
+                  style={[styles.colorBtn, { backgroundColor: c }, currentColor === c && styles.colorBtnActive]}
+                  onPress={() => applyColor(c)}
                 >
                   {currentColor === c && <Ionicons name="checkmark" size={20} color={c === '#FFFFFF' ? 'black' : 'white'} />}
                 </TouchableOpacity>
@@ -521,38 +776,36 @@ const ColoringScreen = () => {
 
           <Modal visible={showColorPicker} transparent animationType="fade">
             <View style={styles.modalOverlay}>
-              <View style={styles.pickerModal}>
-                <Text style={styles.pickerModalTitle}>{t.back === 'Retour' ? 'Choisis ta couleur magique ! ✨' : 'Choose your magic color! ✨'}</Text>
-                
-                <SpectrumPicker 
-                  label={t.back === 'Retour' ? 'Glisse ton doigt pour choisir ! 🌈' : 'Slide your finger to choose! 🌈'}
-                  onColorSelect={(color) => {
-                    setCurrentColor(color);
-                    if(tool === 'eraser') setTool('pen');
-                  }} 
-                />
+              <View style={styles.pickerModalSimple}>
+                <Text style={styles.pickerModalTitle}>
+                  {t.back === 'Retour' ? 'Choisis ta couleur ! 🎨' : 'Pick your color! 🎨'}
+                </Text>
 
-                <View style={styles.pickerDivider} />
-
-                <ScrollView contentContainerStyle={styles.pickerGrid}>
-                  {extendedColors.map((c, i) => (
+                <View style={styles.kidColorGrid}>
+                  {extendedColors.map((c) => (
                     <TouchableOpacity
-                      key={i}
-                      style={[styles.largeColorBtn, {backgroundColor: c}, currentColor === c && styles.colorBtnActive]}
-                      onPress={() => { 
-                        setCurrentColor(c); 
-                        if(tool === 'eraser') setTool('pen'); 
-                        setShowColorPicker(false);
-                        playSound('pop'); 
-                      }}
+                      key={c}
+                      style={[styles.kidColorBtn, { backgroundColor: c }, currentColor === c && styles.kidColorBtnActive]}
+                      onPress={() => applyColor(c, { addToPalette: true, closePicker: true })}
+                      activeOpacity={0.8}
                     >
-                      {currentColor === c && <Ionicons name="checkmark" size={24} color={c === '#FFFFFF' ? 'black' : 'white'} />}
+                      {currentColor === c && (
+                        <Ionicons name="checkmark" size={32} color={c === '#FFFFFF' || c === '#FFD700' ? '#333' : 'white'} />
+                      )}
                     </TouchableOpacity>
                   ))}
-                </ScrollView>
-                <TouchableOpacity 
-                  style={styles.closePickerBtn} 
-                  onPress={() => setShowColorPicker(false)}
+                </View>
+
+                <RainbowPicker
+                  label={t.back === 'Retour' ? 'Choisis la couleur 🌈' : 'Pick a color 🌈'}
+                  shadeLabel={t.back === 'Retour' ? 'Puis plus foncé ou plus clair' : 'Then darker or lighter'}
+                  previewLabel={t.back === 'Retour' ? 'Ta couleur' : 'Your color'}
+                  onColorSelect={(color) => applyColor(color, { addToPalette: false })}
+                />
+
+                <TouchableOpacity
+                  style={styles.closePickerBtn}
+                  onPress={() => applyColor(currentColor, { addToPalette: true, closePicker: true })}
                 >
                   <Text style={styles.closePickerText}>{t.done}</Text>
                 </TouchableOpacity>
@@ -667,6 +920,27 @@ const styles = StyleSheet.create({
   pickerTitle: { fontSize: 24, fontFamily: 'Fredoka-SemiBold', color: '#333', marginBottom: 30, textAlign: 'center' },
   pickerButtons: { width: '100%', gap: 15 },
   pickerBtn: { flexDirection: 'row', alignItems: 'center', padding: 20, borderRadius: 25, gap: 15, elevation: 5 },
+  pickerHint: {
+    marginTop: 20, color: '#666', fontFamily: 'Fredoka-Regular', textAlign: 'center', fontSize: 13,
+    paddingHorizontal: 12,
+  },
+  downloadsModal: { flex: 1, backgroundColor: '#FFF5E1' },
+  downloadsList: { padding: 10 },
+  downloadCard: {
+    flex: 1, margin: 8, backgroundColor: 'white', borderRadius: 16, overflow: 'hidden', elevation: 3,
+  },
+  downloadThumb: { width: '100%', height: 130, backgroundColor: '#f9f9f9' },
+  downloadTitle: {
+    padding: 10, fontSize: 13, fontFamily: 'Fredoka-SemiBold', color: '#333', textTransform: 'capitalize',
+  },
+  downloadsEmpty: {
+    marginTop: 40, paddingHorizontal: 24, textAlign: 'center', color: '#666', fontFamily: 'Fredoka-Regular',
+  },
+  downloadPermissionBanner: {
+    marginHorizontal: 12, marginTop: 8, padding: 12, backgroundColor: '#FFF3CD',
+    borderRadius: 12, borderWidth: 1, borderColor: '#FFE08A',
+  },
+  downloadPermissionText: { color: '#856404', fontFamily: 'Fredoka-SemiBold', textAlign: 'center' },
   btnText: { fontSize: 20, color: 'white', fontFamily: 'Fredoka-SemiBold' },
   saveBtn: { padding: 5 },
   zoomBtn: { padding: 2 },
@@ -685,16 +959,42 @@ const styles = StyleSheet.create({
   colorBtnActive: { borderColor: '#FFD700', transform: [{scale: 1.1}] },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
   pickerModal: { width: '90%', height: '70%', backgroundColor: 'white', borderRadius: 25, padding: 20, alignItems: 'center' },
-  pickerModalTitle: { fontSize: 20, fontFamily: 'Fredoka-SemiBold', color: '#333', marginBottom: 20 },
+  pickerModalSimple: {
+    width: '92%', maxHeight: '85%', backgroundColor: 'white', borderRadius: 28,
+    padding: 20, alignItems: 'center',
+  },
+  pickerModalTitle: { fontSize: 22, fontFamily: 'Fredoka-SemiBold', color: '#333', marginBottom: 16, textAlign: 'center' },
+  kidColorGrid: {
+    flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 12, marginBottom: 16,
+  },
+  kidColorBtn: {
+    width: 56, height: 56, borderRadius: 28, justifyContent: 'center', alignItems: 'center',
+    borderWidth: 3, borderColor: 'white', elevation: 4,
+  },
+  kidColorBtnActive: { borderColor: '#FFD700', borderWidth: 4, transform: [{ scale: 1.08 }] },
+  rainbowSection: { width: '100%', alignItems: 'center', marginBottom: 12 },
   spectrumContainer: { width: '100%', alignItems: 'center', marginBottom: 20 },
-  spectrumLabel: { fontSize: 14, fontFamily: 'Fredoka-SemiBold', color: '#666', marginBottom: 10 },
+  spectrumLabel: { fontSize: 15, fontFamily: 'Fredoka-SemiBold', color: '#666', marginBottom: 10, textAlign: 'center' },
   spectrumBar: { height: 40, borderRadius: 20, overflow: 'hidden', borderWidth: 2, borderColor: '#ddd' },
+  spectrumBarLarge: { height: 52, borderRadius: 26, borderWidth: 3 },
   spectrumCursor: { position: 'absolute', top: 0, width: 20, height: 40, backgroundColor: 'white', borderLeftWidth: 2, borderRightWidth: 2, borderColor: '#333' },
+  spectrumCursorLarge: { width: 28, height: 52, borderRadius: 4 },
+  shadeBar: { height: 44, borderRadius: 22, marginTop: 4 },
+  shadeCursor: { width: 24, height: 44, borderRadius: 4 },
+  shadeHints: {
+    flexDirection: 'row', justifyContent: 'space-between', marginTop: 4, paddingHorizontal: 4,
+  },
+  shadeHintText: { fontSize: 18 },
+  previewRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 12 },
+  colorPreviewLarge: {
+    width: 48, height: 48, borderRadius: 24, borderWidth: 3, borderColor: '#ddd',
+  },
+  previewHint: { fontSize: 14, fontFamily: 'Fredoka-SemiBold', color: '#888' },
   colorPreview: { width: 60, height: 30, borderRadius: 15, marginTop: 10, borderWidth: 2, borderColor: '#ddd' },
   pickerDivider: { width: '100%', height: 1, backgroundColor: '#eee', marginVertical: 15 },
   pickerGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 15, paddingBottom: 20 },
   largeColorBtn: { width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', elevation: 4, borderWidth: 3, borderColor: 'white' },
-  closePickerBtn: { marginTop: 20, backgroundColor: '#FF69B4', paddingVertical: 12, paddingHorizontal: 40, borderRadius: 25 },
+  closePickerBtn: { marginTop: 8, backgroundColor: '#FF69B4', paddingVertical: 14, paddingHorizontal: 48, borderRadius: 28, minWidth: '70%' },
   closePickerText: { color: 'white', fontSize: 18, fontFamily: 'Fredoka-SemiBold' },
   extraToolRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 5 },
   sizeSection: { flexDirection: 'row', gap: 8, alignItems: 'center' },

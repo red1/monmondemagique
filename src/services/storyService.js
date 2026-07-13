@@ -19,6 +19,7 @@ import { isNativeZipAvailable, nativeUnzipToDirectory } from './nativeZip';
 import catalogData from '../../assets/stories/catalog.json';
 import {
   mergeSharedMp3IntoMetaAsync, notifySharedMediaUpdated, scanDownloadsFolder,
+  isSharedMediaCacheFresh, getCachedSharedScan,
 } from './sharedMediaService';
 import { packLog, formatBytes } from '../utils/packLog';
 import { isTransientError, safeJsonParse, withRetry } from '../utils/resilience';
@@ -218,7 +219,12 @@ async function loadLibraryIndex() {
     if (!info.exists) return null;
     const raw = await FileSystem.readAsStringAsync(LIBRARY_INDEX_PATH);
     const parsed = safeJsonParse(raw, null);
-    return parsed?.stories && typeof parsed.stories === 'object' ? parsed.stories : null;
+    const stories = parsed?.stories && typeof parsed.stories === 'object' ? parsed.stories : null;
+    if (!stories) return null;
+    const updatedAt = parsed?.updatedAt
+      || (info.modificationTime ? Math.round(info.modificationTime * 1000) : 0);
+    if (updatedAt > 0) libraryIndexUpdatedAt = updatedAt;
+    return stories;
   } catch (_) {
     return null;
   }
@@ -228,9 +234,15 @@ let libraryIndexDirty = false;
 
 async function saveLibraryIndex(meta) {
   await ensureStoriesDir();
+  libraryIndexUpdatedAt = Date.now();
   await FileSystem.writeAsStringAsync(
     LIBRARY_INDEX_PATH,
-    JSON.stringify({ version: 1, updatedAt: Date.now(), stories: meta }),
+    JSON.stringify({
+      version: 1,
+      updatedAt: libraryIndexUpdatedAt,
+      storyCount: Object.keys(meta).length,
+      stories: meta,
+    }),
   );
 }
 
@@ -291,17 +303,28 @@ function withMetaLock(task) {
   return run;
 }
 
+function isLibraryMetaFresh() {
+  return !!(storiesMetaCache && libraryIndexUpdatedAt > 0
+    && Date.now() - libraryIndexUpdatedAt < LIBRARY_FRESH_MS);
+}
+
 export async function getDownloadedStories({ force = false } = {}) {
   const meta = await loadStoriesMeta({ force });
+  const fresh = !force && isLibraryMetaFresh();
+
+  if (!force && !isActiveDownloadInProgress() && !fresh) {
+    scheduleBackgroundLibrarySync();
+  }
+
   return mergeSharedMp3IntoMetaAsync(meta, {
     force,
-    skipScan: isActiveDownloadInProgress(),
+    skipScan: isActiveDownloadInProgress() || fresh,
   });
 }
 
 export async function getPlayableStories({ syncOnLoad = false } = {}) {
   await migrateLegacyMeta();
-  const metaIsFresh = storiesMetaCache && Date.now() - libraryIndexUpdatedAt < LIBRARY_FRESH_MS;
+  const metaIsFresh = isLibraryMetaFresh();
   if (syncOnLoad && !isActiveDownloadInProgress()) {
     await rebuildLibraryFromDisk({ incremental: false });
   } else if (!metaIsFresh) {
@@ -310,7 +333,9 @@ export async function getPlayableStories({ syncOnLoad = false } = {}) {
   if (!metaIsFresh) {
     scheduleBackgroundMp3Enrich();
   }
-  const meta = await mergeSharedMp3IntoMetaAsync(await loadStoriesMeta());
+  const meta = await mergeSharedMp3IntoMetaAsync(await loadStoriesMeta(), {
+    skipScan: metaIsFresh && !isActiveDownloadInProgress(),
+  });
   return Object.values(meta).sort((a, b) => (a.title || '').localeCompare(b.title || ''));
 }
 
@@ -319,11 +344,19 @@ let syncInFlight = false;
 let backgroundEnrichTimer = null;
 let backgroundEnrichRounds = 0;
 const MAX_BACKGROUND_ENRICH_ROUNDS = 20;
+const INSTALL_STATES_TTL_MS = 5 * 60 * 1000;
+let installStatesCache = null;
+let installStatesCacheAt = 0;
+
+export function invalidateInstallStatesCache() {
+  installStatesCache = null;
+  installStatesCacheAt = 0;
+}
 
 function scheduleBackgroundLibrarySync() {
   if (backgroundSyncTimer || syncInFlight) return;
   if (isActiveDownloadInProgress()) return;
-  if (storiesMetaCache && Date.now() - libraryIndexUpdatedAt < LIBRARY_FRESH_MS) return;
+  if (isLibraryMetaFresh()) return;
   backgroundSyncTimer = setTimeout(async () => {
     backgroundSyncTimer = null;
     syncInFlight = true;
@@ -455,8 +488,10 @@ export async function rebuildLibraryFromDisk({ incremental = false } = {}) {
       await enrichStoriesDurations({ limit: 200 });
     }
 
-    await scanDownloadsFolder({ force: true });
-    notifySharedMediaUpdated();
+    if (!isSharedMediaCacheFresh()) {
+      await scanDownloadsFolder({ force: true });
+      notifySharedMediaUpdated();
+    }
   } finally {
     endBulkLibraryUpdate();
   }
@@ -1745,7 +1780,11 @@ async function trySavePartialPack(packId, pack, packDir, { partial = true, fast 
   return { ...result, partial: !assessment.filesComplete, missing: assessment.missing };
 }
 
-export async function getCatalogInstallStates() {
+export async function getCatalogInstallStates({ force = false } = {}) {
+  if (!force && installStatesCache && Date.now() - installStatesCacheAt < INSTALL_STATES_TTL_MS) {
+    return installStatesCache;
+  }
+
   const packagesMeta = await loadPackagesMeta();
   const states = {};
 
@@ -1768,6 +1807,8 @@ export async function getCatalogInstallStates() {
       }),
   );
 
+  installStatesCache = states;
+  installStatesCacheAt = Date.now();
   return states;
 }
 
@@ -1970,6 +2011,7 @@ async function downloadPackageInternal(packId, onProgress, control) {
 export const downloadStory = downloadPackage;
 
 export async function deletePackage(packId) {
+  invalidateInstallStatesCache();
   const packagesMeta = await loadPackagesMeta();
   const packDir = packagesMeta[packId]?.localPath || `${STORIES_DIR}${packId}/`;
   await cleanupMegaTempFiles(packDir);
@@ -2323,8 +2365,9 @@ export function buildPlaylist(storyIds, downloadedMeta) {
   return items;
 }
 
-export async function refreshSharedDownloads() {
-  if (isActiveDownloadInProgress()) return null;
+export async function refreshSharedDownloads({ force = false } = {}) {
+  if (isActiveDownloadInProgress()) return getCachedSharedScan();
+  if (!force && isSharedMediaCacheFresh()) return getCachedSharedScan();
   const result = await scanDownloadsFolder({ force: true });
   notifySharedMediaUpdated();
   notifyStoriesLibraryUpdated();

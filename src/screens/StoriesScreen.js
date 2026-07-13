@@ -30,6 +30,7 @@ import {
 } from '../services/storyService';
 import { useDebouncedValue } from '../utils/useDebouncedValue';
 import { stopActiveStorySound } from '../utils/storyAudio';
+import { isSharedMediaCacheFresh } from '../services/sharedMediaService';
 
 const DURATION_MAX_CHIPS = [5, 10, 20];
 const STORIES_PAGE_ROWS = 8;
@@ -82,6 +83,9 @@ const StoriesScreen = () => {
   const thumbnailRepairDoneRef = useRef(false);
   const launchingPlayerRef = useRef(false);
   const pendingLibraryRefreshRef = useRef(false);
+  const autoLaunchDoneRef = useRef(false);
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
 
   const sources = getSources();
 
@@ -159,14 +163,13 @@ const StoriesScreen = () => {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [meta, progress] = await Promise.all([
-        getDownloadedStories(),
-        getValidPlaybackProgress(),
-      ]);
+      const meta = await getDownloadedStories();
       if (cancelled) return;
       applyLibraryMeta(meta);
-      setSavedProgress(progress);
       setLoading(false);
+      getValidPlaybackProgress().then((progress) => {
+        if (!cancelled) setSavedProgress(progress);
+      });
       getPlayableStories({ syncOnLoad: false });
     })();
     return () => { cancelled = true; };
@@ -175,10 +178,11 @@ const StoriesScreen = () => {
   useEffect(() => subscribeStoriesLibrary(refreshStoriesLight), [refreshStoriesLight]);
 
   useFocusEffect(useCallback(() => {
+    launchingPlayerRef.current = false;
     getValidPlaybackProgress().then(setSavedProgress);
     getSavedPlaylists().then(setSavedPlaylists);
     getPackUsageCounts().then(setPackUsageCounts);
-    if (!isActiveDownloadInProgress()) {
+    if (!isActiveDownloadInProgress() && !isSharedMediaCacheFresh()) {
       refreshSharedDownloads().catch(() => {});
       if (!thumbnailRepairDoneRef.current) {
         thumbnailRepairDoneRef.current = true;
@@ -220,7 +224,8 @@ const StoriesScreen = () => {
       if (fresh) {
         await resetStoriesPlayed();
       }
-      await stopActiveStorySound();
+      getDownloadedStories().catch(() => {});
+      stopActiveStorySound().catch(() => {});
       playSound('pop');
       const navParams = {
         playlist: JSON.stringify(storyIds),
@@ -232,12 +237,14 @@ const StoriesScreen = () => {
       if (savedPlaylistId) navParams.savedPlaylistId = savedPlaylistId;
       router.replace({ pathname: '/story_player', params: navParams });
     } finally {
-      setTimeout(() => { launchingPlayerRef.current = false; }, 400);
+      setTimeout(() => { launchingPlayerRef.current = false; }, 1500);
     }
   }, [router, playSound, t, resetStoriesPlayed]);
 
   useEffect(() => {
+    if (autoLaunchDoneRef.current) return;
     if (params.autoLaunch !== '1' || !isActive || session?.mode !== 'stories') return;
+    autoLaunchDoneRef.current = true;
     (async () => {
       const downloadedIds = await getDownloadedStoryIds();
       const limit = getStoriesRemaining() ?? session.value;
@@ -320,6 +327,14 @@ const StoriesScreen = () => {
     }
     launchPlayer([storyId], { resume: true });
   }, [launchPlayer, parentalStoryLimit, t]);
+
+  const handleStoryPress = useCallback((storyId) => {
+    if (queueRef.current.length > 0) {
+      toggleSelect(storyId);
+      return;
+    }
+    playStoryDirectly(storyId);
+  }, [toggleSelect, playStoryDirectly]);
 
   const moveQueueItem = (index, direction) => {
     setQueue((prev) => {
@@ -540,7 +555,7 @@ const StoriesScreen = () => {
         sourceName={sourceName}
         displayThumbnail={displayThumbnail}
         fallbackThumbnail={packThumbnail !== displayThumbnail ? packThumbnail : null}
-        onPress={() => playStoryDirectly(storyId)}
+        onPress={() => handleStoryPress(storyId)}
         onLongPress={() => toggleSelect(storyId)}
         onInfoPress={() => openExtraInfoEditor(item)}
         t={t}
@@ -548,7 +563,7 @@ const StoriesScreen = () => {
     );
   }, [
     cardWidth, queueIndexMap, parentalStoryLimit, queue.length,
-    sourceNameById, packThumbnailById, playStoryDirectly, toggleSelect, openExtraInfoEditor, t,
+    sourceNameById, packThumbnailById, handleStoryPress, toggleSelect, openExtraInfoEditor, t,
   ]);
 
   const renderFilterChip = (key, label, active, onPress) => (
@@ -565,15 +580,39 @@ const StoriesScreen = () => {
 
   const listFooter = useMemo(() => {
     if (loading || !filteredStories.length) return null;
-    if (filteredStories.length <= pageSize) return null;
+    const showCount = filteredStories.length > pageSize
+      || paginatedStories.length < filteredStories.length;
+    if (!hasMoreStories && !showCount) return null;
     return (
       <View style={styles.listFooter}>
-        <Text style={styles.listCountText}>
-          {t.storiesShowingCount(paginatedStories.length, filteredStories.length)}
-        </Text>
+        {hasMoreStories ? (
+          <TouchableOpacity
+            style={styles.loadMoreBtn}
+            onPress={loadMoreStories}
+            disabled={loadingMore}
+            activeOpacity={0.85}
+          >
+            {loadingMore ? (
+              <ActivityIndicator size="small" color="#00CED1" />
+            ) : (
+              <>
+                <Ionicons name="chevron-down-circle" size={22} color="#00CED1" />
+                <Text style={styles.loadMoreText}>{t.storiesLoadMore}</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        ) : null}
+        {showCount ? (
+          <Text style={styles.listCountText}>
+            {t.storiesShowingCount(paginatedStories.length, filteredStories.length)}
+          </Text>
+        ) : null}
       </View>
     );
-  }, [loading, filteredStories.length, t, paginatedStories.length, pageSize]);
+  }, [
+    loading, filteredStories.length, hasMoreStories, loadMoreStories, loadingMore,
+    t, paginatedStories.length, pageSize,
+  ]);
 
   return (
     <View style={styles.container}>
@@ -774,6 +813,8 @@ const StoriesScreen = () => {
         maxToRenderPerBatch={8}
         windowSize={5}
         removeClippedSubviews={false}
+        onEndReached={loadMoreStories}
+        onEndReachedThreshold={0.4}
         ListFooterComponent={listFooter}
         ListEmptyComponent={
           loading && !playableStories.length ? (
@@ -828,28 +869,9 @@ const StoriesScreen = () => {
         }
       />
 
-      {hasMoreStories && !loading ? (
-        <TouchableOpacity
-          style={[styles.loadMoreBar, { marginBottom: queue.length ? 8 : 0 }]}
-          onPress={loadMoreStories}
-          disabled={loadingMore}
-        >
-          {loadingMore ? (
-            <ActivityIndicator size="small" color="#00CED1" />
-          ) : (
-            <>
-              <Ionicons name="chevron-down-circle" size={22} color="#00CED1" />
-              <Text style={styles.loadMoreText}>{t.storiesLoadMore}</Text>
-              <Text style={styles.listCountText}>
-                {t.storiesShowingCount(paginatedStories.length, filteredStories.length)}
-              </Text>
-            </>
-          )}
-        </TouchableOpacity>
-      ) : null}
-
       {queue.length > 0 ? (
         <View style={[styles.queueBarWrap, { paddingBottom: Math.max(insets.bottom, 8) }]}>
+          <Text style={styles.queueSelectHint}>{t.storiesQueueSelectHint}</Text>
           <PlaylistQueueBar
             queue={queue}
             meta={downloadedMeta}
@@ -1078,15 +1100,11 @@ const styles = StyleSheet.create({
   rebuildBtnText: { color: '#00CED1', fontFamily: 'Fredoka-SemiBold', fontSize: 14 },
   listFooter: { alignItems: 'center', paddingVertical: 16, gap: 8 },
   loadMoreBtn: {
-    alignItems: 'center', paddingVertical: 14, paddingHorizontal: 20,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 14, paddingHorizontal: 20,
     marginTop: 4, marginBottom: 8, borderRadius: 20,
     backgroundColor: 'white', borderWidth: 2, borderColor: '#00CED1',
-  },
-  loadMoreBar: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-    marginHorizontal: 16, marginTop: 4, paddingVertical: 12, paddingHorizontal: 16,
-    borderRadius: 20, backgroundColor: 'white', borderWidth: 2, borderColor: '#00CED1',
-    elevation: 4, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1,
+    alignSelf: 'stretch', marginHorizontal: 8,
   },
   loadMoreText: { fontSize: 14, fontFamily: 'Fredoka-SemiBold', color: '#00CED1' },
   listCountText: { fontSize: 12, fontFamily: 'Fredoka-SemiBold', color: '#888', marginTop: 0 },
@@ -1114,6 +1132,10 @@ const styles = StyleSheet.create({
   queueBarWrap: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
     backgroundColor: 'white', elevation: 12,
+  },
+  queueSelectHint: {
+    fontSize: 11, fontFamily: 'Fredoka-SemiBold', color: '#888',
+    textAlign: 'center', paddingTop: 8, paddingHorizontal: 16,
   },
   bottomBar: {
     position: 'absolute', bottom: 0, left: 0, right: 0,

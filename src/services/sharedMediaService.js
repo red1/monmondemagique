@@ -15,6 +15,7 @@ export const SYSTEM_DOWNLOADS_LABEL = Platform.select({
 
 const MP3_EXT = /\.mp3$/i;
 const VIDEO_EXT = /\.(mp4|mov|m4v|mkv|webm)$/i;
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif|heic|heif|bmp)$/i;
 const SUBTITLE_EXT = /\.(vtt|srt)$/i;
 
 const ANDROID_PUBLIC_DOWNLOAD_DIRS = [
@@ -96,6 +97,11 @@ function makeVideoId(uri) {
   return `video::${key}`;
 }
 
+function makeImageId(uri) {
+  const key = uri.replace(/[^a-zA-Z0-9]/g, '_').slice(-120);
+  return `coloring::${key}`;
+}
+
 async function readSubtitleFile(uri) {
   try {
     const content = await FileSystem.readAsStringAsync(uri);
@@ -165,15 +171,27 @@ async function makeVideoEntry({ uri, filename, size = 0, modifiedAt = Date.now()
   };
 }
 
+function makeImageEntry({ uri, filename, size = 0, modifiedAt = Date.now() }) {
+  return {
+    imageId: makeImageId(uri),
+    title: humanizeFilename(filename),
+    filename,
+    uri,
+    size,
+    modifiedAt,
+    isDownload: true,
+  };
+}
+
 function makeDedupeKey(filename) {
   return (filename || '').toLowerCase();
 }
 
-async function ingestFileUri(uri, filename, seenUris, seenKeys, mp3Stories, videos, meta = {}) {
+async function ingestFileUri(uri, filename, seenUris, seenKeys, mp3Stories, videos, images, meta = {}) {
   if (!uri) return;
   const name = filename || basenameFromUri(uri);
   const lower = name.toLowerCase();
-  if (!MP3_EXT.test(lower) && !VIDEO_EXT.test(lower)) return;
+  if (!MP3_EXT.test(lower) && !VIDEO_EXT.test(lower) && !IMAGE_EXT.test(lower)) return;
 
   let size = meta.size || 0;
   let modifiedAt = meta.modifiedAt || Date.now();
@@ -203,10 +221,15 @@ async function ingestFileUri(uri, filename, seenUris, seenKeys, mp3Stories, vide
 
   if (VIDEO_EXT.test(lower)) {
     videos.push(await makeVideoEntry({ uri, filename: name, size, modifiedAt }));
+    return;
+  }
+
+  if (IMAGE_EXT.test(lower)) {
+    images.push(makeImageEntry({ uri, filename: name, size, modifiedAt }));
   }
 }
 
-async function scanDirectoryUri(dirUri, seenUris, seenKeys, mp3Stories, videos) {
+async function scanDirectoryUri(dirUri, seenUris, seenKeys, mp3Stories, videos, images) {
   let entries = [];
   try {
     const info = await FileSystem.getInfoAsync(dirUri);
@@ -218,14 +241,14 @@ async function scanDirectoryUri(dirUri, seenUris, seenKeys, mp3Stories, videos) 
 
   for (const entry of entries) {
     const uri = entry.startsWith('file://') ? entry : `${dirUri}${entry}`;
-    await ingestFileUri(uri, entry, seenUris, seenKeys, mp3Stories, videos);
+    await ingestFileUri(uri, entry, seenUris, seenKeys, mp3Stories, videos, images);
   }
 }
 
-async function scanAndroidPublicDownloads(seenUris, seenKeys, mp3Stories, videos) {
+async function scanAndroidPublicDownloads(seenUris, seenKeys, mp3Stories, videos, images) {
   if (Platform.OS !== 'android') return;
   for (const dir of ANDROID_PUBLIC_DOWNLOAD_DIRS) {
-    await scanDirectoryUri(dir, seenUris, seenKeys, mp3Stories, videos);
+    await scanDirectoryUri(dir, seenUris, seenKeys, mp3Stories, videos, images);
   }
 }
 
@@ -239,11 +262,17 @@ async function resolveAssetUri(asset) {
 }
 
 
-async function scanMediaLibraryDownloads(seenUris, seenKeys, mp3Stories, videos) {
+async function scanMediaLibraryDownloads(seenUris, seenKeys, mp3Stories, videos, images) {
   const permission = await requestDownloadsAccess();
   if (!permission.granted && permission.accessPrivileges !== 'limited') {
     return false;
   }
+
+  const mediaTypes = [
+    MediaLibrary.MediaType.audio,
+    MediaLibrary.MediaType.video,
+    MediaLibrary.MediaType.photo,
+  ];
 
   const albums = await MediaLibrary.getAlbumsAsync({ includeSmartAlbums: true });
   const downloadAlbums = albums.filter((album) => /download/i.test(album.title || ''));
@@ -254,14 +283,14 @@ async function scanMediaLibraryDownloads(seenUris, seenKeys, mp3Stories, videos)
     while (hasNext) {
       const page = await MediaLibrary.getAssetsAsync({
         album,
-        mediaType: [MediaLibrary.MediaType.audio, MediaLibrary.MediaType.video],
+        mediaType: mediaTypes,
         first: 250,
         after,
       });
       for (const asset of page.assets) {
         const uri = await resolveAssetUri(asset);
         const filename = asset.filename || basenameFromUri(uri);
-        await ingestFileUri(uri, filename, seenUris, seenKeys, mp3Stories, videos, {
+        await ingestFileUri(uri, filename, seenUris, seenKeys, mp3Stories, videos, images, {
           modifiedAt: (asset.modificationTime || asset.creationTime || Date.now() / 1000) * 1000,
         });
       }
@@ -274,14 +303,14 @@ async function scanMediaLibraryDownloads(seenUris, seenKeys, mp3Stories, videos)
     await ingestAlbum(album);
   }
 
-  // Fallback: paginate audio/video and keep items stored under a Downloads path.
+  // Fallback: paginate media and keep items stored under a Downloads path.
   let after;
   let hasNext = true;
   let pages = 0;
   const MAX_PAGES = 12;
   while (hasNext && pages < MAX_PAGES) {
     const page = await MediaLibrary.getAssetsAsync({
-      mediaType: [MediaLibrary.MediaType.audio, MediaLibrary.MediaType.video],
+      mediaType: mediaTypes,
       first: 300,
       after,
       sortBy: [MediaLibrary.SortBy.modificationTime],
@@ -290,7 +319,7 @@ async function scanMediaLibraryDownloads(seenUris, seenKeys, mp3Stories, videos)
       const uri = await resolveAssetUri(asset);
       if (!isInDownloadsPath(uri)) continue;
       const filename = asset.filename || basenameFromUri(uri);
-      await ingestFileUri(uri, filename, seenUris, seenKeys, mp3Stories, videos, {
+      await ingestFileUri(uri, filename, seenUris, seenKeys, mp3Stories, videos, images, {
         modifiedAt: (asset.modificationTime || asset.creationTime || Date.now() / 1000) * 1000,
       });
     }
@@ -311,14 +340,16 @@ export async function scanDownloadsFolder({ force = false } = {}) {
   const seenKeys = new Set();
   const mp3Stories = [];
   const videos = [];
+  const images = [];
 
-  await scanAndroidPublicDownloads(seenUris, seenKeys, mp3Stories, videos);
-  const hasMediaAccess = await scanMediaLibraryDownloads(seenUris, seenKeys, mp3Stories, videos);
+  await scanAndroidPublicDownloads(seenUris, seenKeys, mp3Stories, videos, images);
+  const hasMediaAccess = await scanMediaLibraryDownloads(seenUris, seenKeys, mp3Stories, videos, images);
 
   mp3Stories.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
   videos.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+  images.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
 
-  const result = { mp3Stories, videos, hasMediaAccess };
+  const result = { mp3Stories, videos, images, hasMediaAccess };
   videosCache = result;
   videosCacheAt = Date.now();
   return result;
@@ -332,6 +363,11 @@ export async function getSharedMp3Stories({ force = false } = {}) {
 export async function getSharedVideos({ force = false } = {}) {
   const { videos } = await scanDownloadsFolder({ force });
   return videos;
+}
+
+export async function getSharedImages({ force = false } = {}) {
+  const { images } = await scanDownloadsFolder({ force });
+  return images;
 }
 
 export async function getVideoById(videoId, { force = false } = {}) {

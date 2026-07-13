@@ -18,6 +18,7 @@ import {
   getPackagesMeta, deletePackage, getCatalogInstallStates,
   fetchPackageSizes, formatBytes, getSourceById,
 } from '../services/storyService';
+import { useDebouncedValue } from '../utils/useDebouncedValue';
 
 const PACKAGES_PAGE_ROWS = 6;
 
@@ -31,6 +32,7 @@ export default function StoryPackagesScreen() {
   const numColumns = isTablet ? 3 : 2;
 
   const [nameFilter, setNameFilter] = useState('');
+  const debouncedNameFilter = useDebouncedValue(nameFilter);
   const [sourceFilter, setSourceFilter] = useState('');
   const [packagesMeta, setPackagesMeta] = useState({});
   const [installStates, setInstallStates] = useState({});
@@ -47,16 +49,14 @@ export default function StoryPackagesScreen() {
 
   const sources = getSources();
 
-  const refreshMeta = useCallback(async () => {
+  const refreshMeta = useCallback(async ({ forceInstallStates = false } = {}) => {
     const [meta, states] = await Promise.all([
       getPackagesMeta(),
-      getCatalogInstallStates(),
+      getCatalogInstallStates({ force: forceInstallStates }),
     ]);
     setPackagesMeta(meta);
     setInstallStates(states);
   }, []);
-
-  useEffect(() => { refreshMeta(); }, [refreshMeta]);
 
   useFocusEffect(useCallback(() => {
     refreshMeta();
@@ -65,19 +65,19 @@ export default function StoryPackagesScreen() {
   const prevActiveCount = useRef(activeCount);
   useEffect(() => {
     if (prevActiveCount.current > activeCount) {
-      refreshMeta();
+      refreshMeta({ forceInstallStates: true });
     }
     prevActiveCount.current = activeCount;
   }, [activeCount, refreshMeta]);
 
   const filteredPackages = useMemo(() => filterPackages({
-    name: nameFilter,
+    name: debouncedNameFilter,
     source: sourceFilter,
-  }), [nameFilter, sourceFilter]);
+  }), [debouncedNameFilter, sourceFilter]);
 
   useEffect(() => {
     setVisibleCount(pageSize);
-  }, [nameFilter, sourceFilter, pageSize]);
+  }, [debouncedNameFilter, sourceFilter, pageSize]);
 
   const paginatedPackages = useMemo(
     () => filteredPackages.slice(0, visibleCount),
@@ -302,6 +302,42 @@ export default function StoryPackagesScreen() {
     </View>
   );
 
+  const listFooter = useMemo(() => {
+    if (!filteredPackages.length) return null;
+    const showCount = filteredPackages.length > pageSize
+      || paginatedPackages.length < filteredPackages.length;
+    if (!hasMorePackages && !showCount) return null;
+    return (
+      <View style={styles.listFooter}>
+        {hasMorePackages ? (
+          <TouchableOpacity
+            style={styles.loadMoreBtn}
+            onPress={loadMorePackages}
+            disabled={loadingMore}
+            activeOpacity={0.85}
+          >
+            {loadingMore ? (
+              <ActivityIndicator size="small" color="#9B59B6" />
+            ) : (
+              <>
+                <Ionicons name="chevron-down-circle" size={22} color="#9B59B6" />
+                <Text style={styles.loadMoreText}>{t.storiesLoadMore}</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        ) : null}
+        {showCount ? (
+          <Text style={styles.listCountText}>
+            {t.storiesShowingCount(paginatedPackages.length, filteredPackages.length)}
+          </Text>
+        ) : null}
+      </View>
+    );
+  }, [
+    filteredPackages.length, hasMorePackages, loadMorePackages, loadingMore,
+    t, paginatedPackages.length, pageSize,
+  ]);
+
   return (
     <View style={styles.container}>
       <AnimatedBackground />
@@ -316,38 +352,17 @@ export default function StoryPackagesScreen() {
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
         ListHeaderComponent={listHeader}
-        contentContainerStyle={[styles.listContent, { paddingBottom: hasMorePackages ? 8 : Math.max(insets.bottom, 16) }]}
+        contentContainerStyle={[styles.listContent, { paddingBottom: Math.max(insets.bottom, 16) }]}
         columnWrapperStyle={numColumns > 1 ? styles.columnWrapper : undefined}
         renderItem={renderPackage}
         initialNumToRender={12}
         maxToRenderPerBatch={8}
         windowSize={7}
         removeClippedSubviews={false}
-        ListFooterComponent={
-          filteredPackages.length > pageSize ? (
-            <Text style={styles.listCountText}>
-              {t.storiesShowingCount(paginatedPackages.length, filteredPackages.length)}
-            </Text>
-          ) : null
-        }
+        onEndReached={loadMorePackages}
+        onEndReachedThreshold={0.4}
+        ListFooterComponent={listFooter}
       />
-
-      {hasMorePackages ? (
-        <TouchableOpacity
-          style={[styles.loadMoreBar, { marginBottom: Math.max(insets.bottom, 12) }]}
-          onPress={loadMorePackages}
-          disabled={loadingMore}
-        >
-          {loadingMore ? (
-            <ActivityIndicator size="small" color="#9B59B6" />
-          ) : (
-            <>
-              <Ionicons name="chevron-down-circle" size={22} color="#9B59B6" />
-              <Text style={styles.loadMoreText}>{t.storiesLoadMore}</Text>
-            </>
-          )}
-        </TouchableOpacity>
-      ) : null}
     </View>
   );
 }
@@ -430,13 +445,14 @@ const styles = StyleSheet.create({
   },
   listCountText: {
     textAlign: 'center', fontSize: 12, fontFamily: 'Fredoka-SemiBold', color: '#888',
-    paddingVertical: 12,
+    paddingVertical: 4,
   },
-  loadMoreBar: {
+  listFooter: { alignItems: 'center', paddingVertical: 16, gap: 8 },
+  loadMoreBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-    marginHorizontal: 16, marginTop: 4, paddingVertical: 12, paddingHorizontal: 16,
+    paddingVertical: 14, paddingHorizontal: 20,
     borderRadius: 20, backgroundColor: 'white', borderWidth: 2, borderColor: '#9B59B6',
-    elevation: 4, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1,
+    alignSelf: 'stretch', marginHorizontal: 8,
   },
   loadMoreText: { fontSize: 14, fontFamily: 'Fredoka-SemiBold', color: '#9B59B6' },
 });
