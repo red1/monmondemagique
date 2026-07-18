@@ -19,6 +19,7 @@ import expo.modules.ApplicationLifecycleDispatcher
 import expo.modules.ReactNativeHostWrapper
 
 import com.monmondemagique.app.storypack.StoryPackPipelinePackage
+import com.monmondemagique.app.storymedia.StoryMediaSessionPackage
 
 class MainApplication : Application(), ReactApplication {
 
@@ -28,6 +29,7 @@ class MainApplication : Application(), ReactApplication {
           override fun getPackages(): List<ReactPackage> {
             val packages = PackageList(this).packages.toMutableList()
             packages.add(StoryPackPipelinePackage())
+            packages.add(StoryMediaSessionPackage())
             return packages
           }
 

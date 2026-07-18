@@ -10,6 +10,8 @@ const STORYPACK_FILES = [
   'MagicWorld/storypack/MegaCtrDecryptor.swift',
   'MagicWorld/storypack/StoryPackPipeline.swift',
   'MagicWorld/storypack/StoryPackPipeline.m',
+  'MagicWorld/storypack/StoryMediaSession.swift',
+  'MagicWorld/storypack/StoryMediaSession.m',
 ];
 
 const BRIDGING_IMPORTS = [

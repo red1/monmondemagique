@@ -1,7 +1,7 @@
-const LOCK_SCREEN_OPTIONS = {
-  showSeekForward: true,
-  showSeekBackward: true,
-};
+import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
+
+const Native = NativeModules.StoryMediaSession;
+const emitter = Native ? new NativeEventEmitter(Native) : null;
 
 export function buildStoryLockScreenMetadata(story, track, fallbackTitle) {
   const title = story?.title || track?.name || fallbackTitle;
@@ -13,40 +13,69 @@ export function buildStoryLockScreenMetadata(story, track, fallbackTitle) {
   return {
     title,
     artist,
-    albumTitle: story?.album || undefined,
     artworkUrl: story?.thumbnail || undefined,
   };
 }
 
-export function buildVideoLockScreenMetadata(video, fallbackTitle) {
+function toNativePayload({
+  title,
+  artist,
+  artworkUrl,
+  isPlaying,
+  positionMs,
+  durationMs,
+  canSkipNext,
+  canSkipPrevious,
+}) {
   return {
-    title: video?.title || fallbackTitle,
-    artist: video?.filename || undefined,
-    artwork: video?.thumbnail || undefined,
+    title: title || 'Magic World',
+    artist: artist || null,
+    artworkUrl: artworkUrl || null,
+    isPlaying: !!isPlaying,
+    positionMs: Math.max(0, Math.round(positionMs || 0)),
+    durationMs: Math.max(0, Math.round(durationMs || 0)),
+    canSkipNext: canSkipNext !== false,
+    canSkipPrevious: canSkipPrevious !== false,
   };
 }
 
-export function activateLockScreen(player, metadata) {
-  if (!player?.setActiveForLockScreen) return;
+export async function activateLockScreen(metadata) {
+  if (!Native?.activate) return;
   try {
-    player.setActiveForLockScreen(true, metadata, LOCK_SCREEN_OPTIONS);
+    await Native.activate(toNativePayload(metadata));
   } catch (_) { /* ignore */ }
 }
 
-export function updateLockScreen(player, metadata) {
-  if (!player?.updateLockScreenMetadata) return;
+export async function updateLockScreen(metadata) {
+  if (!Native?.update) return;
   try {
-    player.updateLockScreenMetadata(metadata);
+    await Native.update(toNativePayload(metadata));
   } catch (_) { /* ignore */ }
 }
 
-export function deactivateLockScreen(player) {
-  if (!player) return;
+export async function deactivateLockScreen() {
+  if (!Native?.deactivate) return;
   try {
-    if (player.clearLockScreenControls) {
-      player.clearLockScreenControls();
-    } else if (player.setActiveForLockScreen) {
-      player.setActiveForLockScreen(false);
-    }
+    await Native.deactivate();
   } catch (_) { /* ignore */ }
+}
+
+/**
+ * Subscribe to native lock-screen / notification media commands.
+ * @param {(event: { command: string, positionMs?: number }) => void} handler
+ * @returns {() => void} unsubscribe
+ */
+export function subscribeLockScreenCommands(handler) {
+  if (!emitter) return () => {};
+  const sub = emitter.addListener('storyMediaCommand', (event) => {
+    if (!event?.command) return;
+    handler(event);
+  });
+  return () => {
+    try { sub.remove(); } catch (_) { /* ignore */ }
+  };
+}
+
+export function isLockScreenControlsAvailable() {
+  return !!Native && Platform.OS !== 'web';
 }

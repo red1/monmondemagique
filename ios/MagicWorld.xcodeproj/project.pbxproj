@@ -19,6 +19,8 @@
 		E8F1A2B3C4D546E7890ABCDE3 /* MegaCtrDecryptor.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8F1A2B3C4D546E7890ABCDEF /* MegaCtrDecryptor.swift */; };
 		F9A2B3C4D5E647F890ABCDEF4 /* StoryPackPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9A2B3C4D5E647F890ABCDEF1 /* StoryPackPipeline.swift */; };
 		A1B2C3D4E5F6478901ABCDEF5 /* StoryPackPipeline.m in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6478901ABCDEF2 /* StoryPackPipeline.m */; };
+		B2C3D4E5F6478901ABCDEF06 /* StoryMediaSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F6478901ABCDEF04 /* StoryMediaSession.swift */; };
+		C3D4E5F6478901ABCDEF0708 /* StoryMediaSession.m in Sources */ = {isa = PBXBuildFile; fileRef = C3D4E5F6478901ABCDEF05 /* StoryMediaSession.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -41,6 +43,8 @@
 		E8F1A2B3C4D546E7890ABCDEF /* MegaCtrDecryptor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MegaCtrDecryptor.swift; path = MagicWorld/storypack/MegaCtrDecryptor.swift; sourceTree = "<group>"; };
 		F9A2B3C4D5E647F890ABCDEF1 /* StoryPackPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = StoryPackPipeline.swift; path = MagicWorld/storypack/StoryPackPipeline.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6478901ABCDEF2 /* StoryPackPipeline.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = StoryPackPipeline.m; path = MagicWorld/storypack/StoryPackPipeline.m; sourceTree = "<group>"; };
+		B2C3D4E5F6478901ABCDEF04 /* StoryMediaSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = StoryMediaSession.swift; path = MagicWorld/storypack/StoryMediaSession.swift; sourceTree = "<group>"; };
+		C3D4E5F6478901ABCDEF05 /* StoryMediaSession.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = StoryMediaSession.m; path = MagicWorld/storypack/StoryMediaSession.m; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -161,6 +165,8 @@
 				E8F1A2B3C4D546E7890ABCDEF /* MegaCtrDecryptor.swift */,
 				F9A2B3C4D5E647F890ABCDEF1 /* StoryPackPipeline.swift */,
 				A1B2C3D4E5F6478901ABCDEF2 /* StoryPackPipeline.m */,
+				B2C3D4E5F6478901ABCDEF04 /* StoryMediaSession.swift */,
+				C3D4E5F6478901ABCDEF05 /* StoryMediaSession.m */,
 			);
 			name = storypack;
 			sourceTree = "<group>";
@@ -308,6 +314,8 @@
 				E8F1A2B3C4D546E7890ABCDE3 /* MegaCtrDecryptor.swift in Sources */,
 				F9A2B3C4D5E647F890ABCDEF4 /* StoryPackPipeline.swift in Sources */,
 				A1B2C3D4E5F6478901ABCDEF5 /* StoryPackPipeline.m in Sources */,
+				B2C3D4E5F6478901ABCDEF06 /* StoryMediaSession.swift in Sources */,
+				C3D4E5F6478901ABCDEF0708 /* StoryMediaSession.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

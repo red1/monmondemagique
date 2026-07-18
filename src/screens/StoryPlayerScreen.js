@@ -26,6 +26,13 @@ import {
 } from '../services/storyService';
 import { safeGoBack } from '../utils/safeNavigation';
 import { stopActiveStorySound, registerStorySound, clearStorySound } from '../utils/storyAudio';
+import {
+  activateLockScreen,
+  updateLockScreen,
+  deactivateLockScreen,
+  subscribeLockScreenCommands,
+  buildStoryLockScreenMetadata,
+} from '../utils/mediaSession';
 import PlayerControlBtn, { playerControlStyles } from '../components/shared/PlayerControlBtn';
 import VolumeControls from '../components/shared/VolumeControls';
 
@@ -78,6 +85,7 @@ export default function StoryPlayerScreen() {
   const [volume, setVolume] = useState(DEFAULT_VOLUME);
 
   const lastPlaybackUiRef = useRef(0);
+  const lastLockScreenSyncRef = useRef(0);
   const positionMsRef = useRef(0);
   const soundRef = useRef(null);
   const totalRemainingRef = useRef(0);
@@ -241,6 +249,28 @@ export default function StoryPlayerScreen() {
     } catch (_) { /* ignore */ }
   }, []);
 
+  const syncLockScreen = useCallback(async ({
+    playing = isPlaying,
+    position = positionMsRef.current,
+    duration = durationMs,
+    sIdx = storyIndexRef.current,
+  } = {}) => {
+    const story = playlistRef.current[sIdx];
+    const track = story?.tracks?.[trackIndexRef.current];
+    const meta = buildStoryLockScreenMetadata(story, track, t.storiesGame);
+    await updateLockScreen({
+      ...meta,
+      isPlaying: playing,
+      positionMs: position,
+      durationMs: duration,
+      canSkipNext: sIdx < playlistRef.current.length - 1,
+      canSkipPrevious: sIdx > 0,
+    });
+  }, [isPlaying, durationMs, t.storiesGame]);
+
+  const syncLockScreenRef = useRef(syncLockScreen);
+  syncLockScreenRef.current = syncLockScreen;
+
   const stopPlayback = useCallback(async () => {
     playbackSessionRef.current += 1;
     await unloadSound();
@@ -272,6 +302,7 @@ export default function StoryPlayerScreen() {
     return () => {
       stopPlaybackRef.current();
       endStoryPlaybackRef.current();
+      deactivateLockScreen();
     };
   }, []);
 
@@ -279,6 +310,7 @@ export default function StoryPlayerScreen() {
     progressFinalizedRef.current = true;
     setIsPlaying(false);
     await unloadSound();
+    await deactivateLockScreen();
     await clearPlaybackProgress();
     deactivateKeepAwake('story-player');
 
@@ -315,6 +347,7 @@ export default function StoryPlayerScreen() {
     if (locked) {
       setIsPlaying(false);
       await unloadSound();
+      await deactivateLockScreen();
       await clearPlaybackProgress();
       deactivateKeepAwake('story-player');
       setShowBedtime(true);
@@ -410,6 +443,20 @@ export default function StoryPlayerScreen() {
       initialStatus.positionMillis || startMs,
     );
 
+    const lockMeta = buildStoryLockScreenMetadata(
+      playingStory,
+      track,
+      t.storiesGame,
+    );
+    await activateLockScreen({
+      ...lockMeta,
+      isPlaying: true,
+      positionMs: initialStatus.positionMillis || startMs,
+      durationMs: initialStatus.durationMillis || 0,
+      canSkipNext: storyIndexRef.current < playlistRef.current.length - 1,
+      canSkipPrevious: storyIndexRef.current > 0,
+    });
+
     sound.setOnPlaybackStatusUpdate((status) => {
       if (!status.isLoaded || sessionId !== playbackSessionRef.current) return;
 
@@ -449,6 +496,14 @@ export default function StoryPlayerScreen() {
         }
         setDurationMs(status.durationMillis || 0);
         setIsPlaying(status.isPlaying);
+        if (now - lastLockScreenSyncRef.current >= 1000) {
+          lastLockScreenSyncRef.current = now;
+          syncLockScreenRef.current?.({
+            playing: status.isPlaying,
+            position: pos,
+            duration: status.durationMillis || 0,
+          });
+        }
       }
 
       if (status.didJustFinish) {
@@ -520,7 +575,12 @@ export default function StoryPlayerScreen() {
     await soundRef.current.setPositionAsync(next);
     setPositionMs(next);
     await persistProgress(storyIndexRef.current, trackIndexRef.current, next);
-  }, [durationMs, persistProgress]);
+    await syncLockScreen({
+      playing: status.isPlaying,
+      position: next,
+      duration,
+    });
+  }, [durationMs, persistProgress, syncLockScreen]);
 
   const togglePlay = useCallback(async () => {
     if (!soundRef.current) return;
@@ -528,10 +588,23 @@ export default function StoryPlayerScreen() {
     if (status.isPlaying) {
       await soundRef.current.pauseAsync();
       await persistProgress(storyIndex, trackIndex, status.positionMillis || 0);
+      await syncLockScreen({
+        playing: false,
+        position: status.positionMillis || 0,
+        duration: status.durationMillis || durationMs,
+      });
     } else {
       await soundRef.current.playAsync();
+      await syncLockScreen({
+        playing: true,
+        position: status.positionMillis || 0,
+        duration: status.durationMillis || durationMs,
+      });
     }
-  }, [storyIndex, trackIndex, persistProgress]);
+  }, [storyIndex, trackIndex, persistProgress, syncLockScreen, durationMs]);
+
+  const togglePlayRef = useRef(togglePlay);
+  togglePlayRef.current = togglePlay;
 
   const seekBy = useCallback(async (deltaMs) => {
     if (!soundRef.current) return;
@@ -582,6 +655,56 @@ export default function StoryPlayerScreen() {
     goToStory(storyIndex + 1);
   }, [goToStory, storyIndex]);
 
+  const skipPreviousStoryRef = useRef(skipPreviousStory);
+  const skipNextStoryRef = useRef(skipNextStory);
+  skipPreviousStoryRef.current = skipPreviousStory;
+  skipNextStoryRef.current = skipNextStory;
+
+  const seekToRef = useRef(seekTo);
+  seekToRef.current = seekTo;
+
+  useEffect(() => subscribeLockScreenCommands((event) => {
+    const command = event?.command;
+    if (command === 'play') {
+      (async () => {
+        if (!soundRef.current) return;
+        const status = await soundRef.current.getStatusAsync();
+        if (status.isLoaded && !status.isPlaying) {
+          await soundRef.current.playAsync();
+          await syncLockScreenRef.current?.({ playing: true, position: status.positionMillis || 0 });
+        }
+      })();
+      return;
+    }
+    if (command === 'pause') {
+      (async () => {
+        if (!soundRef.current) return;
+        const status = await soundRef.current.getStatusAsync();
+        if (status.isLoaded && status.isPlaying) {
+          await soundRef.current.pauseAsync();
+          await persistProgress(storyIndexRef.current, trackIndexRef.current, status.positionMillis || 0);
+          await syncLockScreenRef.current?.({ playing: false, position: status.positionMillis || 0 });
+        }
+      })();
+      return;
+    }
+    if (command === 'toggle') {
+      togglePlayRef.current?.();
+      return;
+    }
+    if (command === 'next') {
+      skipNextStoryRef.current?.();
+      return;
+    }
+    if (command === 'previous') {
+      skipPreviousStoryRef.current?.();
+      return;
+    }
+    if (command === 'seek' && typeof event.positionMs === 'number') {
+      seekToRef.current?.(event.positionMs);
+    }
+  }), [persistProgress]);
+
   const canGoPrevious = storyIndex > 0;
   const canGoNext = storyIndex < playlist.length - 1;
 
@@ -613,6 +736,7 @@ export default function StoryPlayerScreen() {
   const handleBack = useCallback(async () => {
     await saveCurrentProgress({ force: true });
     await stopPlayback();
+    await deactivateLockScreen();
     deactivateKeepAwake('story-player');
     safeGoBack(router, '/stories');
   }, [router, saveCurrentProgress, stopPlayback]);
