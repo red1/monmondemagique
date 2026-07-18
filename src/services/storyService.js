@@ -308,6 +308,20 @@ function isLibraryMetaFresh() {
     && Date.now() - libraryIndexUpdatedAt < LIBRARY_FRESH_MS);
 }
 
+export function isStoriesLibraryFresh() {
+  return isLibraryMetaFresh();
+}
+
+/** Instant in-memory snapshot (null if cache never warmed). */
+export function getCachedDownloadedStories() {
+  return storiesMetaCache;
+}
+
+/** Warm in-memory library cache at app launch (no disk sync). */
+export async function warmLibraryCache() {
+  return loadStoriesMeta();
+}
+
 export async function getDownloadedStories({ force = false } = {}) {
   const meta = await loadStoriesMeta({ force });
   const fresh = !force && isLibraryMetaFresh();

@@ -57,6 +57,14 @@
       ]
     ],
     "scheme": "mon-monde-magique",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/607156cd-039a-4315-bd00-b0b91f149aa1",
+      "fallbackToCacheTimeout": 0,
+      "checkAutomatically": "ON_LOAD"
+    },
     "extra": {
       "router": {
         "origin": false

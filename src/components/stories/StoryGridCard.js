@@ -7,6 +7,7 @@ import { formatStoryDurationLabel } from '../../services/storyService';
 function StoryGridCard({
   item,
   width,
+  thumbnailHeight = 120,
   queueIdx,
   isQueued,
   willPlay,
@@ -63,7 +64,7 @@ function StoryGridCard({
         thumbnail={displayThumbnail}
         fallbackThumbnail={fallbackThumbnail}
         contentType={item.contentType}
-        style={styles.thumbnail}
+        style={[styles.thumbnail, { height: thumbnailHeight }]}
       />
       {isQueued && (
         <View style={[styles.queueBadge, willPlay && styles.queueBadgeActive]}>
@@ -102,6 +103,7 @@ export default memo(StoryGridCard, (prev, next) => (
   && prev.willPlay === next.willPlay
   && prev.displayThumbnail === next.displayThumbnail
   && prev.width === next.width
+  && prev.thumbnailHeight === next.thumbnailHeight
   && prev.onPress === next.onPress
   && prev.onLongPress === next.onLongPress
   && prev.onInfoPress === next.onInfoPress
@@ -110,8 +112,8 @@ export default memo(StoryGridCard, (prev, next) => (
 const styles = StyleSheet.create({
   storyCard: {
     backgroundColor: 'white',
-    borderRadius: 16,
-    marginBottom: 12,
+    borderRadius: 12,
+    marginBottom: 8,
     overflow: 'hidden',
     elevation: 3,
     shadowColor: '#000',
@@ -151,10 +153,10 @@ const styles = StyleSheet.create({
   queueBadgeText: { fontFamily: 'Fredoka-SemiBold', fontSize: 12, color: 'white' },
   storyTitle: {
     fontFamily: 'Fredoka-SemiBold',
-    fontSize: 14,
+    fontSize: 12,
     color: '#333',
-    paddingHorizontal: 10,
-    paddingTop: 8,
+    paddingHorizontal: 8,
+    paddingTop: 6,
   },
   storyMeta: {
     fontFamily: 'Fredoka-SemiBold',

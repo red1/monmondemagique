@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
-  TextInput, useWindowDimensions, Alert, ActivityIndicator, ScrollView, Modal, Pressable,
+  TextInput, useWindowDimensions, Alert, ActivityIndicator, ScrollView, Modal, Pressable, Platform,
 } from 'react-native';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -21,33 +21,45 @@ import {
   getSources, filterPlayableStories, getPlayableStories,
   getDownloadedStories, getValidPlaybackProgress, clearPlaybackProgress,
   getDownloadedStoryIds,
-  subscribeStoriesLibrary, rebuildLibraryFromDisk, debugLogLibraryFileSizes, getStoryFilterOptions,
+  rebuildLibraryFromDisk, debugLogLibraryFileSizes,
   isActiveDownloadInProgress,
   formatStoryDurationLabel, refreshSharedDownloads,
   getSavedPlaylists, saveNamedPlaylist, deleteSavedPlaylist, clearSavedPlaylistProgress,
   getPackUsageCounts, playlistsMatch, getStoryDisplayThumbnail, getPackById,
   repairStoryThumbnailsForLibrary, enrichStoriesLibrary, saveStoryExtraInfo,
+  isStoriesLibraryFresh,
 } from '../services/storyService';
 import { useDebouncedValue } from '../utils/useDebouncedValue';
 import { stopActiveStorySound } from '../utils/storyAudio';
 import { isSharedMediaCacheFresh } from '../services/sharedMediaService';
+import { useAppBootstrap } from '../../contexts/AppBootstrapContext';
+import { getStoriesGridConfig, getStoryCardMetrics } from '../utils/storiesGridConfig';
 
 const DURATION_MAX_CHIPS = [5, 10, 20];
-const STORIES_PAGE_ROWS = 8;
-
-const sortStoriesByTitle = (stories) => [...stories].sort((a, b) => (a.title || '').localeCompare(b.title || ''));
 
 const StoriesScreen = () => {
   const router = useRouter();
   const params = useLocalSearchParams();
   const { playSound } = useSounds();
   const { language } = useLanguage();
-  const { isActive, session, getStoriesRemaining, resetStoriesPlayed } = useParentalControl();
+  const { isActive, session, getStoriesRemaining, resetStoriesPlayed, verifyParentPin } = useParentalControl();
   const t = getStrings(language);
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
-  const isTablet = width >= 768;
-  const numColumns = isTablet ? 3 : 2;
+  const gridConfig = getStoriesGridConfig(width);
+  const { numColumns, pageRows } = gridConfig;
+  const { cardWidth, gap: gridGap, thumbnailHeight } = getStoryCardMetrics(width, numColumns);
+  const pageSize = pageRows * numColumns;
+
+  const {
+    bootstrapped,
+    libraryMeta: downloadedMeta,
+    playableStories,
+    packUsageCounts,
+    filterOptions,
+    refreshLibrary,
+  } = useAppBootstrap();
+  const loading = !bootstrapped;
 
   const [nameFilter, setNameFilter] = useState('');
   const debouncedNameFilter = useDebouncedValue(nameFilter);
@@ -58,33 +70,32 @@ const StoriesScreen = () => {
   const [genreFilter, setGenreFilter] = useState('');
   const [albumFilter, setAlbumFilter] = useState('');
   const [packFilter, setPackFilter] = useState('');
-  const [packUsageCounts, setPackUsageCounts] = useState({});
   const [showPackPicker, setShowPackPicker] = useState(false);
+  const [showGenrePicker, setShowGenrePicker] = useState(false);
   const [durationFilter, setDurationFilter] = useState('min30');
   const [queue, setQueue] = useState([]);
-  const [playableStories, setPlayableStories] = useState([]);
-  const [downloadedMeta, setDownloadedMeta] = useState({});
   const [savedProgress, setSavedProgress] = useState(null);
   const [showResumeModal, setShowResumeModal] = useState(false);
   const [showSavePlaylistModal, setShowSavePlaylistModal] = useState(false);
   const [showSavedPlaylistsModal, setShowSavedPlaylistsModal] = useState(false);
   const [savedPlaylists, setSavedPlaylists] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
-  const [visibleCount, setVisibleCount] = useState(STORIES_PAGE_ROWS * numColumns);
+  const [currentPage, setCurrentPage] = useState(1);
   const [loadingMore, setLoadingMore] = useState(false);
   const [enriching, setEnriching] = useState(false);
   const [extraInfoStory, setExtraInfoStory] = useState(null);
   const [extraInfoDraft, setExtraInfoDraft] = useState('');
-
-  const pageSize = STORIES_PAGE_ROWS * numColumns;
+  const [showResetQuotaModal, setShowResetQuotaModal] = useState(false);
+  const [resetPin, setResetPin] = useState('');
+  const [resettingQuota, setResettingQuota] = useState(false);
 
   const thumbnailRepairDoneRef = useRef(false);
   const launchingPlayerRef = useRef(false);
   const pendingLibraryRefreshRef = useRef(false);
   const autoLaunchDoneRef = useRef(false);
   const queueRef = useRef(queue);
+  const listRef = useRef(null);
   queueRef.current = queue;
 
   const sources = getSources();
@@ -103,31 +114,21 @@ const StoriesScreen = () => {
     return map;
   }, [playableStories]);
 
-  const applyLibraryMeta = useCallback((meta) => {
-    setPlayableStories(sortStoriesByTitle(Object.values(meta)));
-    setDownloadedMeta(meta);
-    setQueue((prev) => prev.filter((id) => meta[id]));
-  }, []);
-
   const refreshStoriesLight = useCallback(async () => {
     if (isActiveDownloadInProgress()) {
       pendingLibraryRefreshRef.current = true;
       try {
-        const meta = await getDownloadedStories();
-        applyLibraryMeta(meta);
+        await refreshLibrary({ soft: true });
       } catch (_) { /* keep current list */ }
       return;
     }
     pendingLibraryRefreshRef.current = false;
     try {
-      const meta = await getDownloadedStories();
-      applyLibraryMeta(meta);
+      await refreshLibrary({ soft: isStoriesLibraryFresh() });
     } catch (_) {
-      applyLibraryMeta({});
-    } finally {
-      setLoading(false);
+      /* keep current list */
     }
-  }, [applyLibraryMeta]);
+  }, [refreshLibrary]);
 
   useEffect(() => {
     if (!pendingLibraryRefreshRef.current) return undefined;
@@ -142,13 +143,12 @@ const StoriesScreen = () => {
   const refreshStoriesFull = useCallback(async () => {
     setSyncing(true);
     try {
-      const stories = await getPlayableStories({ syncOnLoad: true });
+      await getPlayableStories({ syncOnLoad: true });
       const [meta, progress] = await Promise.all([
         getDownloadedStories(),
         getValidPlaybackProgress(),
       ]);
-      setPlayableStories(stories);
-      setDownloadedMeta(meta);
+      await refreshLibrary();
       setSavedProgress(progress);
       setQueue((prev) => prev.filter((id) => meta[id]));
       await debugLogLibraryFileSizes();
@@ -156,32 +156,35 @@ const StoriesScreen = () => {
       await refreshStoriesLight();
     } finally {
       setSyncing(false);
-      setLoading(false);
     }
-  }, [refreshStoriesLight]);
+  }, [refreshStoriesLight, refreshLibrary]);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const meta = await getDownloadedStories();
-      if (cancelled) return;
-      applyLibraryMeta(meta);
-      setLoading(false);
-      getValidPlaybackProgress().then((progress) => {
-        if (!cancelled) setSavedProgress(progress);
-      });
-      getPlayableStories({ syncOnLoad: false });
-    })();
-    return () => { cancelled = true; };
-  }, [applyLibraryMeta]);
+    getValidPlaybackProgress().then(setSavedProgress);
+  }, []);
 
-  useEffect(() => subscribeStoriesLibrary(refreshStoriesLight), [refreshStoriesLight]);
+  useEffect(() => {
+    // Only prune queue when we have a non-empty library snapshot.
+    // An empty intermediate refresh must not wipe the selection (that caused
+    // the next tap to auto-launch a story).
+    const ids = Object.keys(downloadedMeta || {});
+    if (!ids.length) return;
+    setQueue((prev) => {
+      const next = prev.filter((id) => downloadedMeta[id]);
+      return next.length === prev.length ? prev : next;
+    });
+  }, [downloadedMeta]);
 
   useFocusEffect(useCallback(() => {
     launchingPlayerRef.current = false;
     getValidPlaybackProgress().then(setSavedProgress);
     getSavedPlaylists().then(setSavedPlaylists);
-    getPackUsageCounts().then(setPackUsageCounts);
+    // Soft refresh: keep in-memory library — do not re-scan disk on every visit.
+    if (!isStoriesLibraryFresh() || !playableStories.length) {
+      refreshLibrary({ soft: false }).catch(() => {});
+    } else {
+      refreshLibrary({ soft: true }).catch(() => {});
+    }
     if (!isActiveDownloadInProgress() && !isSharedMediaCacheFresh()) {
       refreshSharedDownloads().catch(() => {});
       if (!thumbnailRepairDoneRef.current) {
@@ -191,7 +194,7 @@ const StoriesScreen = () => {
         });
       }
     }
-  }, [refreshStoriesLight]));
+  }, [refreshStoriesLight, refreshLibrary, playableStories.length]));
 
   const refreshSavedPlaylists = useCallback(async () => {
     setSavedPlaylists(await getSavedPlaylists());
@@ -201,10 +204,6 @@ const StoriesScreen = () => {
     ? getStoriesRemaining()
     : null;
 
-  const filterOptions = useMemo(
-    () => getStoryFilterOptions(playableStories, packUsageCounts),
-    [playableStories, packUsageCounts],
-  );
 
   const selectedPackLabel = useMemo(() => {
     if (!packFilter) return t.storiesAllPacks;
@@ -279,24 +278,46 @@ const StoriesScreen = () => {
   }, [debouncedNameFilter, sourceFilter, typeFilter, debouncedArtistFilter, albumFilter, genreFilter, packFilter, durationFilter, playableStories]);
 
   useEffect(() => {
-    setVisibleCount(pageSize);
+    setCurrentPage(1);
   }, [nameFilter, sourceFilter, typeFilter, artistFilter, genreFilter, albumFilter, packFilter, durationFilter, pageSize, playableStories.length]);
 
+  const totalPages = Math.max(1, Math.ceil(filteredStories.length / pageSize));
+
+  useEffect(() => {
+    if (currentPage > totalPages) setCurrentPage(totalPages);
+  }, [currentPage, totalPages]);
+
   const paginatedStories = useMemo(
-    () => filteredStories.slice(0, visibleCount),
-    [filteredStories, visibleCount],
+    () => filteredStories.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [filteredStories, currentPage, pageSize],
   );
 
-  const hasMoreStories = visibleCount < filteredStories.length;
+  const hasMoreStories = currentPage < totalPages;
+
+  const visiblePageNumbers = useMemo(() => {
+    const maxButtons = 5;
+    let start = Math.max(1, currentPage - 2);
+    let end = Math.min(totalPages, start + maxButtons - 1);
+    start = Math.max(1, end - maxButtons + 1);
+    const pages = [];
+    for (let i = start; i <= end; i += 1) pages.push(i);
+    return pages;
+  }, [currentPage, totalPages]);
+
+  const goToPage = useCallback((page) => {
+    const nextPage = Math.max(1, Math.min(page, totalPages));
+    setCurrentPage(nextPage);
+    listRef.current?.scrollToOffset({ offset: 0, animated: true });
+  }, [totalPages]);
 
   const loadMoreStories = useCallback(() => {
     if (!hasMoreStories || loadingMore) return;
     setLoadingMore(true);
     requestAnimationFrame(() => {
-      setVisibleCount((prev) => Math.min(prev + pageSize, filteredStories.length));
+      setCurrentPage((prev) => Math.min(prev + 1, totalPages));
       setLoadingMore(false);
     });
-  }, [hasMoreStories, loadingMore, pageSize, filteredStories.length]);
+  }, [hasMoreStories, loadingMore, totalPages]);
 
   const hasStories = playableStories.some((story) => story.contentType === 'story');
   const hasSongs = playableStories.some((story) => story.contentType === 'song');
@@ -328,7 +349,13 @@ const StoriesScreen = () => {
     launchPlayer([storyId], { resume: true });
   }, [launchPlayer, parentalStoryLimit, t]);
 
+  // Tap always toggles selection — never auto-launches (avoids accidental play while building a queue).
   const handleStoryPress = useCallback((storyId) => {
+    toggleSelect(storyId);
+  }, [toggleSelect]);
+
+  // Long-press plays a single story immediately.
+  const handleStoryLongPress = useCallback((storyId) => {
     if (queueRef.current.length > 0) {
       toggleSelect(storyId);
       return;
@@ -457,7 +484,6 @@ const StoriesScreen = () => {
     } finally {
       setRebuilding(false);
       setSyncing(false);
-      setLoading(false);
     }
   };
 
@@ -501,8 +527,39 @@ const StoriesScreen = () => {
     router.push('/story_packages');
   };
 
+  const openResetQuotaModal = () => {
+    playSound('pop');
+    setResetPin('');
+    setShowResetQuotaModal(true);
+  };
+
+  const handleConfirmResetQuota = async () => {
+    if (resetPin.length !== 4) {
+      Alert.alert(t.error, t.parentalPin);
+      return;
+    }
+    setResettingQuota(true);
+    try {
+      await verifyParentPin(resetPin);
+      await resetStoriesPlayed();
+      setShowResetQuotaModal(false);
+      setResetPin('');
+      playSound('success');
+      Alert.alert(t.success, t.storiesResetQuotaDone);
+    } catch (_) {
+      Alert.alert(t.error, t.parentalWrongPin);
+    } finally {
+      setResettingQuota(false);
+    }
+  };
+
   const catalogButton = (
     <View style={styles.headerActions}>
+      {parentalStoryLimit != null ? (
+        <TouchableOpacity style={styles.catalogBtn} onPress={openResetQuotaModal}>
+          <Ionicons name="refresh-circle" size={24} color="white" />
+        </TouchableOpacity>
+      ) : null}
       <TouchableOpacity style={styles.catalogBtn} onPress={openSavedPlaylists}>
         <Ionicons name="bookmark" size={22} color="white" />
       </TouchableOpacity>
@@ -534,8 +591,6 @@ const StoriesScreen = () => {
     </View>
   );
 
-  const cardWidth = (width - 48) / numColumns - 8;
-
   const renderStory = useCallback(({ item }) => {
     const storyId = item.storyId;
     const queueIdx = queueIndexMap.get(storyId);
@@ -549,6 +604,7 @@ const StoriesScreen = () => {
       <StoryGridCard
         item={item}
         width={cardWidth}
+        thumbnailHeight={thumbnailHeight}
         queueIdx={queueIdx ?? 0}
         isQueued={isQueued}
         willPlay={willPlay}
@@ -556,14 +612,14 @@ const StoriesScreen = () => {
         displayThumbnail={displayThumbnail}
         fallbackThumbnail={packThumbnail !== displayThumbnail ? packThumbnail : null}
         onPress={() => handleStoryPress(storyId)}
-        onLongPress={() => toggleSelect(storyId)}
+        onLongPress={() => handleStoryLongPress(storyId)}
         onInfoPress={() => openExtraInfoEditor(item)}
         t={t}
       />
     );
   }, [
-    cardWidth, queueIndexMap, parentalStoryLimit, queue.length,
-    sourceNameById, packThumbnailById, handleStoryPress, toggleSelect, openExtraInfoEditor, t,
+    cardWidth, thumbnailHeight, queueIndexMap, parentalStoryLimit, queue.length,
+    sourceNameById, packThumbnailById, handleStoryPress, handleStoryLongPress, openExtraInfoEditor, t,
   ]);
 
   const renderFilterChip = (key, label, active, onPress) => (
@@ -578,13 +634,52 @@ const StoriesScreen = () => {
     </TouchableOpacity>
   );
 
+  const selectedGenreLabel = useMemo(() => {
+    if (!genreFilter) return t.storiesFilterGenre;
+    return genreFilter;
+  }, [genreFilter, t.storiesFilterGenre]);
+
   const listFooter = useMemo(() => {
-    if (loading || !filteredStories.length) return null;
-    const showCount = filteredStories.length > pageSize
-      || paginatedStories.length < filteredStories.length;
-    if (!hasMoreStories && !showCount) return null;
+    if (!filteredStories.length) return null;
+    const showPagination = totalPages > 1;
+    const showCount = filteredStories.length > pageSize;
+    if (!showPagination && !showCount && !hasMoreStories) return null;
     return (
       <View style={styles.listFooter}>
+        {showPagination ? (
+          <View style={styles.paginationRow}>
+            <TouchableOpacity
+              style={[styles.pageBtn, currentPage <= 1 && styles.pageBtnDisabled]}
+              onPress={() => goToPage(currentPage - 1)}
+              disabled={currentPage <= 1}
+            >
+              <Ionicons name="chevron-back" size={18} color={currentPage <= 1 ? '#ccc' : '#00CED1'} />
+            </TouchableOpacity>
+            {visiblePageNumbers.map((page) => (
+              <TouchableOpacity
+                key={`page-${page}`}
+                style={[styles.pageNumBtn, page === currentPage && styles.pageNumBtnActive]}
+                onPress={() => goToPage(page)}
+              >
+                <Text style={[styles.pageNumText, page === currentPage && styles.pageNumTextActive]}>
+                  {page}
+                </Text>
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity
+              style={[styles.pageBtn, currentPage >= totalPages && styles.pageBtnDisabled]}
+              onPress={() => goToPage(currentPage + 1)}
+              disabled={currentPage >= totalPages}
+            >
+              <Ionicons name="chevron-forward" size={18} color={currentPage >= totalPages ? '#ccc' : '#00CED1'} />
+            </TouchableOpacity>
+          </View>
+        ) : null}
+        {showPagination ? (
+          <Text style={styles.pageIndicatorText}>
+            {t.storiesPageIndicator(currentPage, totalPages)}
+          </Text>
+        ) : null}
         {hasMoreStories ? (
           <TouchableOpacity
             style={styles.loadMoreBtn}
@@ -610,8 +705,9 @@ const StoriesScreen = () => {
       </View>
     );
   }, [
-    loading, filteredStories.length, hasMoreStories, loadMoreStories, loadingMore,
-    t, paginatedStories.length, pageSize,
+    filteredStories.length, hasMoreStories, loadMoreStories, loadingMore,
+    t, paginatedStories.length, pageSize, totalPages, currentPage,
+    visiblePageNumbers, goToPage,
   ]);
 
   return (
@@ -621,42 +717,56 @@ const StoriesScreen = () => {
 
       <View style={[styles.filters, { paddingHorizontal: 16 }]}>
         {parentalStoryLimit != null && (
-          <View style={styles.parentalBanner}>
-            <Text style={styles.parentalBannerText}>
+          <View style={styles.parentalBannerCompact}>
+            <Text style={styles.parentalBannerTextCompact} numberOfLines={1}>
               🛡️ {t.parentalActiveStories(parentalStoryLimit)}
             </Text>
-            <Text style={styles.parentalHint}>{t.storiesParentalQueueHint}</Text>
+            <TouchableOpacity style={styles.resetQuotaInlineBtn} onPress={openResetQuotaModal}>
+              <Ionicons name="refresh" size={14} color="white" />
+              <Text style={styles.resetQuotaInlineText}>{t.storiesResetQuota}</Text>
+            </TouchableOpacity>
           </View>
         )}
-        <TextInput
-          style={styles.filterInput}
-          placeholder={t.storiesSearchPlaceholder}
-          placeholderTextColor="#999"
-          value={nameFilter}
-          onChangeText={setNameFilter}
-        />
-        {(filterOptions.packs ?? []).length > 0 && (
+        <View style={styles.filterRowCompact}>
+          <TextInput
+            style={[styles.filterInputCompact, styles.filterInputFlex]}
+            placeholder={t.storiesSearchPlaceholder}
+            placeholderTextColor="#999"
+            value={nameFilter}
+            onChangeText={setNameFilter}
+          />
+          <TextInput
+            style={[styles.filterInputCompact, styles.filterInputFlex]}
+            placeholder={t.storiesArtistFilter}
+            placeholderTextColor="#999"
+            value={artistFilter}
+            onChangeText={setArtistFilter}
+          />
+        </View>
+        <View style={styles.filterPickerRow}>
           <TouchableOpacity
-            style={styles.packPickerBtn}
+            style={[styles.packPickerBtnCompact, styles.filterPickerFlex]}
             onPress={() => { playSound('pop'); setShowPackPicker(true); }}
             activeOpacity={0.85}
           >
-            <Ionicons name="albums-outline" size={18} color="#9B59B6" />
-            <Text style={styles.packPickerText} numberOfLines={1}>{selectedPackLabel}</Text>
-            <Ionicons name="chevron-down" size={18} color="#9B59B6" />
+            <Ionicons name="albums-outline" size={14} color="#9B59B6" />
+            <Text style={styles.packPickerTextCompact} numberOfLines={1}>{selectedPackLabel}</Text>
+            <Ionicons name="chevron-down" size={14} color="#9B59B6" />
           </TouchableOpacity>
-        )}
-        <TextInput
-          style={styles.filterInputCompact}
-          placeholder={t.storiesArtistFilter}
-          placeholderTextColor="#999"
-          value={artistFilter}
-          onChangeText={setArtistFilter}
-        />
+          <TouchableOpacity
+            style={[styles.packPickerBtnCompact, styles.filterPickerFlex, genreFilter && styles.packPickerBtnActive]}
+            onPress={() => { playSound('pop'); setShowGenrePicker(true); }}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="musical-notes-outline" size={14} color="#9B59B6" />
+            <Text style={styles.packPickerTextCompact} numberOfLines={1}>{selectedGenreLabel}</Text>
+            <Ionicons name="chevron-down" size={14} color="#9B59B6" />
+          </TouchableOpacity>
+        </View>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.filterScroll}
+          contentContainerStyle={styles.filterScrollCompact}
         >
           {renderFilterChip('source-all', t.storiesAllSources, !sourceFilter, () => setSourceFilter(''))}
           {sources.map((s) => renderFilterChip(
@@ -707,22 +817,55 @@ const StoriesScreen = () => {
             durationFilter === 'all',
             () => setDurationFilter('all'),
           )}
-          {(filterOptions.genres ?? []).slice(0, 6).map((genre) => renderFilterChip(
-            `genre-${genre}`,
-            genre,
-            genreFilter === genre,
-            () => setGenreFilter(genreFilter === genre ? '' : genre),
-          ))}
         </ScrollView>
-        {syncing && (
-          <View style={styles.syncBanner}>
+        {(loading || syncing) && (
+          <View style={styles.syncBannerCompact}>
             <ActivityIndicator size="small" color="#00CED1" />
-            <Text style={styles.syncBannerText}>
-              {enriching ? t.storiesEnriching : t.storiesSyncing}
+            <Text style={styles.syncBannerTextCompact}>
+              {enriching ? t.storiesEnriching : loading ? t.appLoading : t.storiesSyncing}
             </Text>
           </View>
         )}
       </View>
+
+      <Modal visible={showResetQuotaModal} transparent animationType="fade">
+        <Pressable style={styles.packModalOverlay} onPress={() => setShowResetQuotaModal(false)}>
+          <Pressable style={styles.resetQuotaSheet} onPress={(e) => e.stopPropagation()}>
+            <Text style={styles.resetQuotaTitle}>{t.storiesResetQuotaTitle}</Text>
+            <Text style={styles.resetQuotaHint}>{t.storiesResetQuotaHint}</Text>
+            <TextInput
+              style={styles.resetPinInput}
+              value={resetPin}
+              onChangeText={(v) => setResetPin(v.replace(/\D/g, '').slice(0, 4))}
+              keyboardType="number-pad"
+              secureTextEntry
+              maxLength={4}
+              placeholder="••••"
+              placeholderTextColor="#aaa"
+              autoFocus
+            />
+            <View style={styles.extraInfoActions}>
+              <TouchableOpacity
+                style={styles.extraInfoCancel}
+                onPress={() => setShowResetQuotaModal(false)}
+              >
+                <Text style={styles.extraInfoCancelText}>{t.back}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.extraInfoSave}
+                onPress={handleConfirmResetQuota}
+                disabled={resettingQuota}
+              >
+                {resettingQuota ? (
+                  <ActivityIndicator color="white" />
+                ) : (
+                  <Text style={styles.extraInfoSaveText}>{t.storiesResetQuotaConfirm}</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       <Modal visible={!!extraInfoStory} transparent animationType="slide">
         <Pressable style={styles.packModalOverlay} onPress={() => setExtraInfoStory(null)}>
@@ -796,7 +939,44 @@ const StoriesScreen = () => {
         </Pressable>
       </Modal>
 
+      <Modal visible={showGenrePicker} transparent animationType="slide">
+        <Pressable style={styles.packModalOverlay} onPress={() => setShowGenrePicker(false)}>
+          <Pressable style={styles.packModalSheet} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.packModalHeader}>
+              <Text style={styles.packModalTitle}>{t.storiesFilterGenre}</Text>
+              <TouchableOpacity onPress={() => setShowGenrePicker(false)}>
+                <Ionicons name="close" size={26} color="#666" />
+              </TouchableOpacity>
+            </View>
+            <FlatList
+              data={[{ genre: '', label: t.storiesAllGenres }, ...(filterOptions.genres ?? []).map((g) => ({ genre: g, label: g }))]}
+              keyExtractor={(item) => item.genre || 'all-genres'}
+              contentContainerStyle={styles.packModalList}
+              renderItem={({ item }) => {
+                const isActive = genreFilter === item.genre;
+                return (
+                  <TouchableOpacity
+                    style={[styles.packModalRow, isActive && styles.packModalRowActive]}
+                    onPress={() => {
+                      setGenreFilter(item.genre);
+                      setShowGenrePicker(false);
+                      playSound('pop');
+                    }}
+                  >
+                    <Text style={[styles.packModalRowTitle, isActive && styles.packModalRowTitleActive]} numberOfLines={2}>
+                      {item.label}
+                    </Text>
+                    {isActive ? <Ionicons name="checkmark-circle" size={22} color="#9B59B6" /> : null}
+                  </TouchableOpacity>
+                );
+              }}
+            />
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       <FlatList
+        ref={listRef}
         style={styles.storyList}
         data={paginatedStories}
         keyExtractor={(item) => item.storyId}
@@ -806,13 +986,14 @@ const StoriesScreen = () => {
           styles.listContent,
           { paddingBottom: queue.length ? 220 : 120 },
         ]}
-        columnWrapperStyle={numColumns > 1 ? styles.columnWrapper : undefined}
+        columnWrapperStyle={numColumns > 1 ? [styles.columnWrapper, { gap: gridGap }] : undefined}
         renderItem={renderStory}
         extraData={queue}
-        initialNumToRender={Math.min(10, pageSize)}
-        maxToRenderPerBatch={8}
-        windowSize={5}
-        removeClippedSubviews={false}
+        initialNumToRender={Math.min(pageSize, 28)}
+        maxToRenderPerBatch={numColumns * 3}
+        windowSize={7}
+        updateCellsBatchingPeriod={50}
+        removeClippedSubviews={Platform.OS === 'android'}
         onEndReached={loadMoreStories}
         onEndReachedThreshold={0.4}
         ListFooterComponent={listFooter}
@@ -972,7 +1153,90 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center',
   },
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  filters: { paddingTop: 8, paddingBottom: 4, gap: 6 },
+  filters: { paddingTop: 6, paddingBottom: 2, gap: 4 },
+  filterRowCompact: { flexDirection: 'row', gap: 6 },
+  filterInputFlex: { flex: 1, minWidth: 0 },
+  filterPickerRow: { flexDirection: 'row', gap: 6 },
+  filterPickerFlex: { flex: 1, minWidth: 0 },
+  parentalBannerCompact: {
+    backgroundColor: '#9B59B6', borderRadius: 10, paddingVertical: 6, paddingHorizontal: 10,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+  },
+  parentalBannerTextCompact: { color: 'white', fontFamily: 'Fredoka-SemiBold', fontSize: 12, flex: 1 },
+  resetQuotaInlineBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: 'rgba(255,255,255,0.22)', borderRadius: 12,
+    paddingHorizontal: 8, paddingVertical: 4,
+  },
+  resetQuotaInlineText: { color: 'white', fontFamily: 'Fredoka-SemiBold', fontSize: 11 },
+  resetQuotaSheet: {
+    backgroundColor: 'white', borderRadius: 20, marginHorizontal: 28,
+    padding: 20, gap: 12, alignSelf: 'center', width: '85%', maxWidth: 400,
+    marginTop: '35%',
+  },
+  resetQuotaTitle: { fontFamily: 'Fredoka-SemiBold', fontSize: 18, color: '#333', textAlign: 'center' },
+  resetQuotaHint: { fontFamily: 'Fredoka-SemiBold', fontSize: 13, color: '#888', textAlign: 'center' },
+  resetPinInput: {
+    backgroundColor: '#f9f9f9', borderRadius: 12, paddingVertical: 12, paddingHorizontal: 16,
+    fontSize: 22, textAlign: 'center', letterSpacing: 8, borderWidth: 1, borderColor: '#ddd',
+  },
+  packPickerBtnCompact: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#F8F0FF',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#9B59B6',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  packPickerBtnActive: { backgroundColor: '#EDE0FF', borderColor: '#7D3C98' },
+  packPickerTextCompact: {
+    flex: 1,
+    fontFamily: 'Fredoka-SemiBold',
+    fontSize: 11,
+    color: '#5a3e5c',
+  },
+  filterScrollCompact: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 1 },
+  syncBannerCompact: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingVertical: 2, paddingHorizontal: 4,
+  },
+  syncBannerTextCompact: { fontSize: 11, fontFamily: 'Fredoka-SemiBold', color: '#666' },
+  paginationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+  pageBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'white',
+    borderWidth: 1,
+    borderColor: '#00CED1',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pageBtnDisabled: { borderColor: '#ddd', backgroundColor: '#f5f5f5' },
+  pageNumBtn: {
+    minWidth: 34,
+    height: 34,
+    paddingHorizontal: 8,
+    borderRadius: 17,
+    backgroundColor: 'white',
+    borderWidth: 1,
+    borderColor: '#ddd',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pageNumBtnActive: { backgroundColor: '#00CED1', borderColor: '#00CED1' },
+  pageNumText: { fontSize: 13, fontFamily: 'Fredoka-SemiBold', color: '#333' },
+  pageNumTextActive: { color: 'white' },
+  pageIndicatorText: { fontSize: 12, fontFamily: 'Fredoka-SemiBold', color: '#888' },
   parentalBanner: {
     backgroundColor: '#9B59B6', borderRadius: 12, paddingVertical: 8, paddingHorizontal: 12,
   },
@@ -984,8 +1248,8 @@ const styles = StyleSheet.create({
     borderWidth: 2, borderColor: '#00CED1',
   },
   filterInputCompact: {
-    backgroundColor: 'white', borderRadius: 16, paddingHorizontal: 14,
-    paddingVertical: 8, fontSize: 14, fontFamily: 'Fredoka-SemiBold',
+    backgroundColor: 'white', borderRadius: 10, paddingHorizontal: 10,
+    paddingVertical: 6, fontSize: 12, fontFamily: 'Fredoka-SemiBold',
     borderWidth: 1, borderColor: '#ddd',
   },
   packPickerBtn: {
@@ -1047,22 +1311,21 @@ const styles = StyleSheet.create({
     paddingVertical: 8, fontSize: 14, fontFamily: 'Fredoka-SemiBold',
     borderWidth: 1, borderColor: '#ddd',
   },
-  filters: { paddingTop: 8, paddingBottom: 4, gap: 6 },
   filterScroll: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 2 },
   filterChip: {
-    backgroundColor: 'white', paddingHorizontal: 10, paddingVertical: 5,
-    borderRadius: 14, borderWidth: 1, borderColor: '#ddd',
+    backgroundColor: 'white', paddingHorizontal: 8, paddingVertical: 4,
+    borderRadius: 10, borderWidth: 1, borderColor: '#ddd',
   },
   filterChipActive: { backgroundColor: '#00CED1', borderColor: '#00CED1' },
-  filterChipText: { fontSize: 12, fontFamily: 'Fredoka-SemiBold', color: '#333' },
+  filterChipText: { fontSize: 10, fontFamily: 'Fredoka-SemiBold', color: '#333' },
   filterChipTextActive: { color: 'white' },
   syncBanner: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     paddingVertical: 6, paddingHorizontal: 10,
   },
   syncBannerText: { fontSize: 12, fontFamily: 'Fredoka-SemiBold', color: '#666' },
-  listContent: { padding: 16 },
-  columnWrapper: { justifyContent: 'flex-start', gap: 8 },
+  listContent: { paddingHorizontal: 16, paddingTop: 8 },
+  columnWrapper: { justifyContent: 'flex-start' },
   storyCard: {
     backgroundColor: 'white', borderRadius: 16, marginBottom: 12,
     overflow: 'hidden', elevation: 4, borderWidth: 3, borderColor: 'transparent',

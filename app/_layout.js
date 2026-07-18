@@ -1,5 +1,5 @@
 import { Stack } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useFonts } from 'expo-font';
 import * as SplashScreen from 'expo-splash-screen';
 import { Platform, View } from 'react-native';
@@ -8,36 +8,27 @@ import { SoundProvider } from '../contexts/SoundContext';
 import { LanguageProvider } from '../contexts/LanguageContext';
 import { ParentalControlProvider } from '../contexts/ParentalControlContext';
 import { StoryDownloadProvider } from '../contexts/StoryDownloadContext';
+import { AppBootstrapProvider, useAppBootstrap } from '../contexts/AppBootstrapContext';
 import ParentalLockOverlay from '../src/components/shared/ParentalLockOverlay';
 import StoryDownloadBanner from '../src/components/shared/StoryDownloadBanner';
 import AppErrorBoundary from '../src/components/shared/AppErrorBoundary';
+import AppSplashOverlay from '../src/components/shared/AppSplashOverlay';
 
 SplashScreen.preventAutoHideAsync();
 
-export default function Layout() {
-  const [fontsLoaded] = useFonts({
-    'Fredoka-SemiBold': require('../assets/fonts/Fredoka-SemiBold.ttf'),
-  });
-  const [skiaReady] = useState(Platform.OS !== 'web');
+function RootShell() {
+  const { bootstrapped } = useAppBootstrap();
+  const showSplash = !bootstrapped;
 
-  const onLayoutRootView = useCallback(async () => {
-    if (fontsLoaded && skiaReady) {
-      await SplashScreen.hideAsync();
+  useEffect(() => {
+    if (bootstrapped) {
+      SplashScreen.hideAsync().catch(() => {});
     }
-  }, [fontsLoaded, skiaReady]);
-
-  if (!fontsLoaded || !skiaReady) {
-    return null;
-  }
+  }, [bootstrapped]);
 
   return (
-    <AppErrorBoundary>
-    <SafeAreaProvider>
-    <LanguageProvider>
-      <SoundProvider>
-        <StoryDownloadProvider>
-        <ParentalControlProvider>
-        <View style={{ flex: 1 }} onLayout={onLayoutRootView}>
+    <>
+        <View style={{ flex: 1 }}>
           <Stack
             screenOptions={{
               headerStyle: {
@@ -76,6 +67,39 @@ export default function Layout() {
           <StoryDownloadBanner />
           <ParentalLockOverlay />
         </View>
+        <AppSplashOverlay visible={showSplash} />
+    </>
+  );
+}
+
+export default function Layout() {
+  const [fontsLoaded] = useFonts({
+    'Fredoka-SemiBold': require('../assets/fonts/Fredoka-SemiBold.ttf'),
+  });
+  const [skiaReady] = useState(Platform.OS !== 'web');
+
+  const onLayoutRootView = useCallback(async () => {
+    if (fontsLoaded && skiaReady) {
+      await SplashScreen.hideAsync();
+    }
+  }, [fontsLoaded, skiaReady]);
+
+  if (!fontsLoaded || !skiaReady) {
+    return null;
+  }
+
+  return (
+    <AppErrorBoundary>
+    <SafeAreaProvider>
+    <LanguageProvider>
+      <SoundProvider>
+        <StoryDownloadProvider>
+        <ParentalControlProvider>
+        <AppBootstrapProvider>
+        <View style={{ flex: 1 }} onLayout={onLayoutRootView}>
+          <RootShell />
+        </View>
+        </AppBootstrapProvider>
         </ParentalControlProvider>
         </StoryDownloadProvider>
       </SoundProvider>

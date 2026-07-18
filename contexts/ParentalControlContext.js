@@ -193,6 +193,14 @@ export function ParentalControlProvider({ children }) {
     await restoreBrightness();
   }, [persistSession, restoreBrightness]);
 
+  const verifyParentPin = useCallback(async (parentPin) => {
+    const currentPin = await loadPin();
+    if (parentPin !== currentPin) {
+      throw new Error('INVALID_PIN');
+    }
+    return true;
+  }, []);
+
   const unlockScreen = useCallback(async (parentPin) => {
     const currentPin = await loadPin();
     if (parentPin !== currentPin) {
@@ -395,6 +403,7 @@ export function ParentalControlProvider({ children }) {
     deactivateSession,
     unlockScreen,
     unlockAfterMathVerification,
+    verifyParentPin,
     changePin,
     resetPin,
     recordStoryCompleted,
@@ -414,7 +423,7 @@ export function ParentalControlProvider({ children }) {
     mode: session?.mode || 'off',
   }), [
     pin, session, isLocked, showWarning, remainingMs,
-    activateSession, deactivateSession, unlockScreen, unlockAfterMathVerification, changePin, resetPin,
+    activateSession, deactivateSession, unlockScreen, unlockAfterMathVerification, verifyParentPin, changePin, resetPin,
     recordStoryCompleted, recordVideoCompleted, resetStoriesPlayed, resetVideosPlayed,
     getStoriesRemaining, getVideosRemaining, shouldWarnForStoryEnd, shouldWarnForVideoEnd,
     isStoryLimitReached, isVideoLimitReached, dismissWarning, triggerWarning, lockScreen,

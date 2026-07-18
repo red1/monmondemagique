@@ -125,7 +125,21 @@ libraryIndexUpdatedAt // fraîcheur 5 min → skip sync/enrich inutile
 
 ---
 
-## 8. Pistes futures (non implémentées)
+## 8. Bootstrap & retour arrière-plan (juillet 2026)
+
+| Changement | Bénéfice |
+|------------|----------|
+| **`AppBootstrapContext`** | Précharge bibliothèque + filtres packs au lancement |
+| **Splash animé + loader** | Feedback visuel pendant le warm cache |
+| **`AppState` → refresh** | Retour app : bibliothèque à jour sans rechargement complet |
+| **Grille 7×12+ (tablette)** | 84+ histoires visibles dès la 1ʳᵉ page |
+| **Pagination numérotée** | Navigation directe + bouton « Charger plus » |
+| **Filtres compacts** | Pack + genre toujours disponibles (modals), moins de hauteur |
+| **`Image.prefetch`** | Vignettes préchargées en mémoire au scroll |
+
+---
+
+## 9. Pistes futures (non implémentées)
 
 - `expo-image` avec cache disque pour vignettes catalogue
 - Provider download scopé aux routes `/stories*` uniquement
@@ -135,7 +149,7 @@ libraryIndexUpdatedAt // fraîcheur 5 min → skip sync/enrich inutile
 
 ---
 
-## Fichiers modifiés (perf juillet 2026)
+## 10. Fichiers modifiés (perf juillet 2026 — bootstrap)
 
 ```
 src/services/zipExtract.js       — streaming, queue partagée, yield
@@ -149,4 +163,9 @@ src/components/shared/StoryCoverImage.js — memo
 src/utils/useDebouncedValue.js — nouveau
 contexts/StoryDownloadContext.js — split actions/progress
 contexts/SoundContext.js       — useMemo/useCallback
+contexts/AppBootstrapContext.js — preload bibliothèque, AppState refresh
+app/_layout.js                  — splash overlay + bootstrap provider
+src/components/shared/AppSplashOverlay.js — splash animé
+src/utils/storiesGridConfig.js  — grille 7 colonnes tablette
+src/components/shared/StoryCoverImage.js — prefetch vignettes
 ```

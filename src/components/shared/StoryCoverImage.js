@@ -2,6 +2,8 @@ import React, { memo, useEffect, useState } from 'react';
 import { View, Image, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
+const prefetchedUris = new Set();
+
 function StoryCoverImage({
   thumbnail, fallbackThumbnail, contentType, style, placeholderStyle,
 }) {
@@ -11,6 +13,10 @@ function StoryCoverImage({
   useEffect(() => {
     setUri(thumbnail || null);
     setFailed(false);
+    if (thumbnail && !prefetchedUris.has(thumbnail)) {
+      prefetchedUris.add(thumbnail);
+      Image.prefetch(thumbnail).catch(() => {});
+    }
   }, [thumbnail]);
 
   const showPlaceholder = !uri || failed;
