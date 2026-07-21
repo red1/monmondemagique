@@ -98,6 +98,8 @@ export default memo(StoryGridCard, (prev, next) => (
   && prev.item.title === next.item.title
   && prev.item.thumbnail === next.item.thumbnail
   && prev.item.extraInfo === next.item.extraInfo
+  && prev.item.durationMs === next.item.durationMs
+  && prev.item.durationMinutes === next.item.durationMinutes
   && prev.queueIdx === next.queueIdx
   && prev.isQueued === next.isQueued
   && prev.willPlay === next.willPlay

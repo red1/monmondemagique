@@ -640,8 +640,35 @@ export function getStoryDurationMs(story) {
 export function formatStoryDurationLabel(story) {
   const ms = getStoryDurationMs(story);
   if (ms == null || ms <= 0) return null;
-  if (ms < 60000) return `${Math.max(1, Math.round(ms / 1000))} s`;
-  return `${Math.max(1, Math.round(ms / 60000))} min`;
+  if (ms < 60000) return `≈ ${Math.max(1, Math.round(ms / 1000))} s`;
+  const totalSec = Math.round(ms / 1000);
+  const mins = Math.floor(totalSec / 60);
+  const secs = totalSec % 60;
+  if (mins < 60) {
+    return secs === 0 ? `≈ ${mins} min` : `≈ ${mins}:${String(secs).padStart(2, '0')}`;
+  }
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return `≈ ${hours} h ${remMins} min`;
+}
+
+export function formatDurationMsCompact(ms) {
+  if (ms == null || ms <= 0) return null;
+  const totalSec = Math.round(ms / 1000);
+  const mins = Math.floor(totalSec / 60);
+  const secs = totalSec % 60;
+  if (mins < 60) return `${mins}:${String(secs).padStart(2, '0')}`;
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  return `${hours}h${String(remMins).padStart(2, '0')}`;
+}
+
+export function formatQueueEndsAt(totalMs, now = Date.now()) {
+  if (!totalMs || totalMs <= 0) return null;
+  const end = new Date(now + totalMs);
+  const hh = String(end.getHours()).padStart(2, '0');
+  const mm = String(end.getMinutes()).padStart(2, '0');
+  return `${hh}:${mm}`;
 }
 
 function applyStoryDurations(story) {
@@ -903,6 +930,7 @@ export function filterPackages({ name = '', source = '' } = {}) {
 export function filterPlayableStories({
   name = '', source = '', contentType = '', artist = '', album = '', genre = '', packId = '',
   maxDurationMinutes = null,
+  minDurationMinutes = null,
   minDurationSeconds = null,
   maxDurationSeconds = null,
   includeUnknownDuration = true,
@@ -940,8 +968,20 @@ export function filterPlayableStories({
       if (durationMs >= maxDurationSeconds * 1000) return false;
     }
 
+    if (minDurationMinutes != null && minDurationMinutes > 0) {
+      if (durationMin == null) {
+        if (!includeUnknownDuration) return false;
+      } else if (durationMin < minDurationMinutes) {
+        return false;
+      }
+    }
+
     if (maxDurationMinutes != null && maxDurationMinutes > 0) {
-      if (durationMin == null || durationMin > maxDurationMinutes) return false;
+      if (durationMin == null) {
+        if (!includeUnknownDuration) return false;
+      } else if (durationMin > maxDurationMinutes) {
+        return false;
+      }
     }
     return true;
   });

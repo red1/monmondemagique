@@ -27,7 +27,7 @@ import {
   getSavedPlaylists, saveNamedPlaylist, deleteSavedPlaylist, clearSavedPlaylistProgress,
   getPackUsageCounts, playlistsMatch, getStoryDisplayThumbnail, getPackById,
   repairStoryThumbnailsForLibrary, enrichStoriesLibrary, saveStoryExtraInfo,
-  isStoriesLibraryFresh,
+  isStoriesLibraryFresh, getStoryDurationMs, formatDurationMsCompact, formatQueueEndsAt,
 } from '../services/storyService';
 import { useDebouncedValue } from '../utils/useDebouncedValue';
 import { stopActiveStorySound } from '../utils/storyAudio';
@@ -35,7 +35,12 @@ import { isSharedMediaCacheFresh } from '../services/sharedMediaService';
 import { useAppBootstrap } from '../../contexts/AppBootstrapContext';
 import { getStoriesGridConfig, getStoryCardMetrics } from '../utils/storiesGridConfig';
 
-const DURATION_MAX_CHIPS = [5, 10, 20];
+const DURATION_FILTERS = [
+  { key: 'all', labelKey: 'storiesDurationAll' },
+  { key: 'small', labelKey: 'storiesDurationSmall' },
+  { key: 'medium', labelKey: 'storiesDurationMedium' },
+  { key: 'large', labelKey: 'storiesDurationLarge' },
+];
 
 const StoriesScreen = () => {
   const router = useRouter();
@@ -72,7 +77,7 @@ const StoriesScreen = () => {
   const [packFilter, setPackFilter] = useState('');
   const [showPackPicker, setShowPackPicker] = useState(false);
   const [showGenrePicker, setShowGenrePicker] = useState(false);
-  const [durationFilter, setDurationFilter] = useState('min30');
+  const [durationFilter, setDurationFilter] = useState('all');
   const [queue, setQueue] = useState([]);
   const [savedProgress, setSavedProgress] = useState(null);
   const [showResumeModal, setShowResumeModal] = useState(false);
@@ -82,6 +87,7 @@ const StoriesScreen = () => {
   const [syncing, setSyncing] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
+  const [loadedPageCount, setLoadedPageCount] = useState(1);
   const [loadingMore, setLoadingMore] = useState(false);
   const [enriching, setEnriching] = useState(false);
   const [extraInfoStory, setExtraInfoStory] = useState(null);
@@ -263,36 +269,43 @@ const StoriesScreen = () => {
       genre: genreFilter,
       packId: packFilter,
       stories: playableStories,
+      includeUnknownDuration: false,
     };
-    if (durationFilter === 'min30') {
-      opts.minDurationSeconds = 30;
+    if (durationFilter === 'small') {
+      opts.maxDurationMinutes = 5;
+    } else if (durationFilter === 'medium') {
+      opts.minDurationMinutes = 5;
+      opts.maxDurationMinutes = 15;
+    } else if (durationFilter === 'large') {
+      opts.minDurationMinutes = 15;
+    } else {
+      // all — include unknown durations
       opts.includeUnknownDuration = true;
-    } else if (durationFilter === 'under30') {
-      opts.maxDurationSeconds = 30;
-    } else if (durationFilter === 'all') {
-      // no duration constraint
-    } else if (durationFilter.startsWith('under')) {
-      opts.maxDurationMinutes = parseInt(durationFilter.replace('under', ''), 10);
     }
     return filterPlayableStories(opts);
   }, [debouncedNameFilter, sourceFilter, typeFilter, debouncedArtistFilter, albumFilter, genreFilter, packFilter, durationFilter, playableStories]);
 
   useEffect(() => {
     setCurrentPage(1);
+    setLoadedPageCount(1);
   }, [nameFilter, sourceFilter, typeFilter, artistFilter, genreFilter, albumFilter, packFilter, durationFilter, pageSize, playableStories.length]);
 
   const totalPages = Math.max(1, Math.ceil(filteredStories.length / pageSize));
 
   useEffect(() => {
     if (currentPage > totalPages) setCurrentPage(totalPages);
-  }, [currentPage, totalPages]);
+    if (loadedPageCount > totalPages) setLoadedPageCount(totalPages);
+  }, [currentPage, loadedPageCount, totalPages]);
+
+  // Cumulative cache: once a page is visited, its items stay in the list.
+  const visibleCount = Math.min(loadedPageCount * pageSize, filteredStories.length);
 
   const paginatedStories = useMemo(
-    () => filteredStories.slice((currentPage - 1) * pageSize, currentPage * pageSize),
-    [filteredStories, currentPage, pageSize],
+    () => filteredStories.slice(0, visibleCount),
+    [filteredStories, visibleCount],
   );
 
-  const hasMoreStories = currentPage < totalPages;
+  const hasMoreStories = loadedPageCount < totalPages;
 
   const visiblePageNumbers = useMemo(() => {
     const maxButtons = 5;
@@ -301,23 +314,76 @@ const StoriesScreen = () => {
     start = Math.max(1, end - maxButtons + 1);
     const pages = [];
     for (let i = start; i <= end; i += 1) pages.push(i);
+    // Always keep page 1 reachable in the pager.
+    if (!pages.includes(1) && totalPages >= 1) {
+      pages.unshift(1);
+      if (pages.length > maxButtons) pages.pop();
+    }
     return pages;
   }, [currentPage, totalPages]);
 
+  const pageOffsetsRef = useRef({});
+  const paginationRef = useRef({ currentPage: 1, loadedPageCount: 1, totalPages: 1, pageSize: 1 });
+  paginationRef.current = { currentPage, loadedPageCount, totalPages, pageSize };
+
   const goToPage = useCallback((page) => {
     const nextPage = Math.max(1, Math.min(page, totalPages));
+    setLoadedPageCount((prev) => Math.max(prev, nextPage));
     setCurrentPage(nextPage);
-    listRef.current?.scrollToOffset({ offset: 0, animated: true });
-  }, [totalPages]);
+    const targetIndex = (nextPage - 1) * pageSize;
+    requestAnimationFrame(() => {
+      try {
+        if (nextPage === 1) {
+          listRef.current?.scrollToOffset({ offset: 0, animated: true });
+        } else {
+          listRef.current?.scrollToIndex({
+            index: Math.min(targetIndex, Math.max(visibleCount - 1, 0)),
+            animated: true,
+            viewPosition: 0,
+          });
+        }
+      } catch (_) {
+        const offset = pageOffsetsRef.current[nextPage];
+        if (typeof offset === 'number') {
+          listRef.current?.scrollToOffset({ offset, animated: true });
+        }
+      }
+    });
+  }, [totalPages, pageSize, visibleCount]);
 
   const loadMoreStories = useCallback(() => {
     if (!hasMoreStories || loadingMore) return;
     setLoadingMore(true);
     requestAnimationFrame(() => {
-      setCurrentPage((prev) => Math.min(prev + 1, totalPages));
+      setLoadedPageCount((prev) => {
+        const next = Math.min(prev + 1, totalPages);
+        setCurrentPage(next);
+        return next;
+      });
       setLoadingMore(false);
     });
   }, [hasMoreStories, loadingMore, totalPages]);
+
+  const onViewableItemsChanged = useRef(({ viewableItems }) => {
+    if (!viewableItems?.length) return;
+    const firstIndex = viewableItems[0]?.index;
+    if (typeof firstIndex !== 'number' || firstIndex < 0) return;
+    const { totalPages: tp, pageSize: ps, loadedPageCount: loaded, currentPage: cur } = paginationRef.current;
+    const pageFromScroll = Math.min(tp, Math.floor(firstIndex / ps) + 1);
+    if (pageFromScroll !== cur && pageFromScroll <= loaded) {
+      setCurrentPage(pageFromScroll);
+    }
+  }).current;
+
+  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 40 }).current;
+
+  const onStoryLayout = useCallback((index, y) => {
+    const page = Math.floor(index / pageSize) + 1;
+    const isFirstOfPage = index % pageSize === 0;
+    if (isFirstOfPage && typeof y === 'number') {
+      pageOffsetsRef.current[page] = y;
+    }
+  }, [pageSize]);
 
   const hasStories = playableStories.some((story) => story.contentType === 'story');
   const hasSongs = playableStories.some((story) => story.contentType === 'song');
@@ -332,6 +398,23 @@ const StoriesScreen = () => {
     return queue.slice(0, parentalStoryLimit);
   }, [queue, parentalStoryLimit]);
 
+  const queueTotalDurationMs = useMemo(() => {
+    return playQueue.reduce((sum, id) => {
+      const story = downloadedMeta[id];
+      return sum + (getStoryDurationMs(story) || 0);
+    }, 0);
+  }, [playQueue, downloadedMeta]);
+
+  const queueEndsAtLabel = useMemo(() => {
+    if (playQueue.length < 2 || !queueTotalDurationMs) return null;
+    return formatQueueEndsAt(queueTotalDurationMs);
+  }, [playQueue.length, queueTotalDurationMs]);
+
+  const queueDurationLabel = useMemo(
+    () => formatDurationMsCompact(queueTotalDurationMs),
+    [queueTotalDurationMs],
+  );
+
   const toggleSelect = useCallback((id) => {
     playSound('pop');
     setQueue((prev) => {
@@ -341,27 +424,14 @@ const StoriesScreen = () => {
     });
   }, [playSound]);
 
-  const playStoryDirectly = useCallback((storyId) => {
-    if (parentalStoryLimit === 0) {
-      Alert.alert(t.storiesGame, t.parentalMaxSelected(0));
-      return;
-    }
-    launchPlayer([storyId], { resume: true });
-  }, [launchPlayer, parentalStoryLimit, t]);
-
-  // Tap always toggles selection — never auto-launches (avoids accidental play while building a queue).
+  // Tap / long-press only select — never auto-launch while browsing.
   const handleStoryPress = useCallback((storyId) => {
     toggleSelect(storyId);
   }, [toggleSelect]);
 
-  // Long-press plays a single story immediately.
   const handleStoryLongPress = useCallback((storyId) => {
-    if (queueRef.current.length > 0) {
-      toggleSelect(storyId);
-      return;
-    }
-    playStoryDirectly(storyId);
-  }, [toggleSelect, playStoryDirectly]);
+    toggleSelect(storyId);
+  }, [toggleSelect]);
 
   const moveQueueItem = (index, direction) => {
     setQueue((prev) => {
@@ -591,7 +661,7 @@ const StoriesScreen = () => {
     </View>
   );
 
-  const renderStory = useCallback(({ item }) => {
+  const renderStory = useCallback(({ item, index }) => {
     const storyId = item.storyId;
     const queueIdx = queueIndexMap.get(storyId);
     const isQueued = queueIdx != null;
@@ -601,25 +671,33 @@ const StoriesScreen = () => {
     const packThumbnail = packThumbnailById.get(item.packId) || null;
 
     return (
-      <StoryGridCard
-        item={item}
-        width={cardWidth}
-        thumbnailHeight={thumbnailHeight}
-        queueIdx={queueIdx ?? 0}
-        isQueued={isQueued}
-        willPlay={willPlay}
-        sourceName={sourceName}
-        displayThumbnail={displayThumbnail}
-        fallbackThumbnail={packThumbnail !== displayThumbnail ? packThumbnail : null}
-        onPress={() => handleStoryPress(storyId)}
-        onLongPress={() => handleStoryLongPress(storyId)}
-        onInfoPress={() => openExtraInfoEditor(item)}
-        t={t}
-      />
+      <View
+        onLayout={(e) => {
+          // For multi-column lists, y is relative to the row — store for page anchors.
+          onStoryLayout(index, e.nativeEvent.layout.y);
+        }}
+      >
+        <StoryGridCard
+          item={item}
+          width={cardWidth}
+          thumbnailHeight={thumbnailHeight}
+          queueIdx={queueIdx ?? 0}
+          isQueued={isQueued}
+          willPlay={willPlay}
+          sourceName={sourceName}
+          displayThumbnail={displayThumbnail}
+          fallbackThumbnail={packThumbnail !== displayThumbnail ? packThumbnail : null}
+          onPress={() => handleStoryPress(storyId)}
+          onLongPress={() => handleStoryLongPress(storyId)}
+          onInfoPress={() => openExtraInfoEditor(item)}
+          t={t}
+        />
+      </View>
     );
   }, [
     cardWidth, thumbnailHeight, queueIndexMap, parentalStoryLimit, queue.length,
-    sourceNameById, packThumbnailById, handleStoryPress, handleStoryLongPress, openExtraInfoEditor, t,
+    sourceNameById, packThumbnailById, handleStoryPress, handleStoryLongPress,
+    openExtraInfoEditor, t, onStoryLayout,
   ]);
 
   const renderFilterChip = (key, label, active, onPress) => (
@@ -793,30 +871,12 @@ const StoriesScreen = () => {
             typeFilter === 'song',
             () => setTypeFilter(typeFilter === 'song' ? '' : 'song'),
           )}
-          {renderFilterChip(
-            'dur-min30',
-            t.storiesDurationOver30,
-            durationFilter === 'min30',
-            () => setDurationFilter('min30'),
-          )}
-          {renderFilterChip(
-            'dur-under30',
-            t.storiesDurationUnder30,
-            durationFilter === 'under30',
-            () => setDurationFilter('under30'),
-          )}
-          {DURATION_MAX_CHIPS.map((mins) => renderFilterChip(
-            `dur-under${mins}`,
-            t.storiesDurationUnder(mins),
-            durationFilter === `under${mins}`,
-            () => setDurationFilter(durationFilter === `under${mins}` ? 'min30' : `under${mins}`),
+          {DURATION_FILTERS.map((filter) => renderFilterChip(
+            `dur-${filter.key}`,
+            t[filter.labelKey],
+            durationFilter === filter.key,
+            () => setDurationFilter(filter.key),
           ))}
-          {renderFilterChip(
-            'dur-all',
-            t.storiesDurationAll,
-            durationFilter === 'all',
-            () => setDurationFilter('all'),
-          )}
         </ScrollView>
         {(loading || syncing) && (
           <View style={styles.syncBannerCompact}>
@@ -991,11 +1051,25 @@ const StoriesScreen = () => {
         extraData={queue}
         initialNumToRender={Math.min(pageSize, 28)}
         maxToRenderPerBatch={numColumns * 3}
-        windowSize={7}
+        windowSize={9}
         updateCellsBatchingPeriod={50}
         removeClippedSubviews={Platform.OS === 'android'}
         onEndReached={loadMoreStories}
-        onEndReachedThreshold={0.4}
+        onEndReachedThreshold={0.35}
+        onViewableItemsChanged={onViewableItemsChanged}
+        viewabilityConfig={viewabilityConfig}
+        onScrollToIndexFailed={(info) => {
+          // Wait for newly loaded page items to mount, then retry.
+          setTimeout(() => {
+            try {
+              listRef.current?.scrollToIndex({
+                index: info.index,
+                animated: true,
+                viewPosition: 0,
+              });
+            } catch (_) { /* ignore */ }
+          }, 120);
+        }}
         ListFooterComponent={listFooter}
         ListEmptyComponent={
           loading && !playableStories.length ? (
@@ -1069,6 +1143,9 @@ const StoriesScreen = () => {
               play: t.storiesPlayQueue,
               resume: t.storiesResume,
               save: t.storiesSavePlaylist,
+              endsAt: queueEndsAtLabel
+                ? t.storiesQueueEndsAt(queueEndsAtLabel, queueDurationLabel)
+                : null,
             }}
           />
         </View>

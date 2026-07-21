@@ -24,11 +24,16 @@ export default function PlaylistQueueBar({
         <Text style={styles.headerTitle}>
           {labels.title(queue.length)}
         </Text>
-        {playLimit != null && (
-          <Text style={styles.headerHint}>
-            {labels.willPlay(playCount)}
-          </Text>
-        )}
+        <View style={styles.headerRight}>
+          {labels.endsAt ? (
+            <Text style={styles.endsAtText}>{labels.endsAt}</Text>
+          ) : null}
+          {playLimit != null && (
+            <Text style={styles.headerHint}>
+              {labels.willPlay(playCount)}
+            </Text>
+          )}
+        </View>
       </View>
 
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.scroll}>
@@ -106,9 +111,12 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 8,
+    gap: 8,
   },
-  headerTitle: { fontFamily: 'Fredoka-SemiBold', fontSize: 14, color: '#333' },
+  headerRight: { flexShrink: 1, alignItems: 'flex-end', gap: 2 },
+  headerTitle: { fontFamily: 'Fredoka-SemiBold', fontSize: 14, color: '#333', flexShrink: 0 },
   headerHint: { fontFamily: 'Fredoka-SemiBold', fontSize: 12, color: '#32CD32' },
+  endsAtText: { fontFamily: 'Fredoka-SemiBold', fontSize: 12, color: '#9B59B6', textAlign: 'right' },
   scroll: { maxHeight: 92, marginBottom: 10 },
   item: {
     width: 140,
